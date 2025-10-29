@@ -1,0 +1,14 @@
+prefix=C:/Program Files (x86)/libraw
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libraw
+Description: Raw image decoder library (non-thread-safe)
+URL: http://www.libraw.org
+Requires:
+Version: 0.21.4
+Libs: -L${libdir} -lraw
+Cflags: -I${includedir} -I${includedir}/libraw
+Libs.private: 
+Requires.private: 
