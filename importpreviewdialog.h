@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QPixmap>
 #include <QFutureWatcher>
+#include "librarymanager.h"
 
 namespace Ui {
 class ImportPreviewDialog;
@@ -15,7 +16,7 @@ class ImportPreviewDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit ImportPreviewDialog(const QStringList &imagePaths, QWidget *parent = nullptr);
+    explicit ImportPreviewDialog(const QStringList &imagePaths, QWidget *parent = nullptr, LibraryManager *libraryManager = nullptr);
     ~ImportPreviewDialog();
 
     enum ImportMode {
@@ -37,6 +38,7 @@ private:
     QStringList m_imagePaths;
     ImportMode m_importMode;
     QFutureWatcher<void> m_thumbnailLoadingWatcher;
+    LibraryManager *m_libraryManager;
 
     void loadThumbnails();
 };

@@ -28,7 +28,7 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    static QPixmap loadPixmapFromFile(const QString &filePath, bool isThumbnail);
+    static QPixmap loadPixmapFromFile(const QString &filePath, bool isThumbnail, LibraryManager *libraryManager);
 
 public slots:
     void on_actionExit_triggered();

@@ -11,11 +11,12 @@
 #include <QImage>
 #include "mainwindow.h" // Include mainwindow.h to access MainWindow::loadPixmapFromFile
 
-ImportPreviewDialog::ImportPreviewDialog(const QStringList &imagePaths, QWidget *parent) :
+ImportPreviewDialog::ImportPreviewDialog(const QStringList &imagePaths, QWidget *parent, LibraryManager *libraryManager) :
     QDialog(parent),
     ui(new Ui::ImportPreviewDialog),
     m_imagePaths(imagePaths),
-    m_importMode(CancelMode)
+    m_importMode(CancelMode),
+    m_libraryManager(libraryManager)
 {
     ui->setupUi(this);
     setWindowTitle(tr("Import Preview"));
@@ -65,7 +66,7 @@ void ImportPreviewDialog::loadThumbnails()
     }
 
     QFuture<void> future = QtConcurrent::map(m_imagePaths, [this](const QString &filePath) {
-        QPixmap pix = MainWindow::loadPixmapFromFile(filePath, true);
+        QPixmap pix = MainWindow::loadPixmapFromFile(filePath, true, m_libraryManager);
         if(!pix.isNull()) {
             QMetaObject::invokeMethod(this, "onThumbnailLoaded", Qt::QueuedConnection,
                                       Q_ARG(QString, filePath),

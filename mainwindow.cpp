@@ -141,16 +141,61 @@ void MainWindow::delayedApplyAdjustments()
 }
 
 // This function can now load either a fast thumbnail or a full-quality image
-QPixmap MainWindow::loadPixmapFromFile(const QString &filePath, bool isThumbnail)
+QPixmap MainWindow::loadPixmapFromFile(const QString &filePath, bool isThumbnail, LibraryManager *libraryManager)
 {
     if (filePath.isEmpty()) {
         qWarning() << "Attempted to load pixmap from an empty file path.";
         return QPixmap();
     }
 
+    QPixmap pixmap;
+    const int THUMBNAIL_CACHE_HEIGHT = 360; // Define the fixed height for cached thumbnails
+
+    // --- THUMBNAIL CACHING LOGIC (using info.prinfo) ---
+    // Always check cache first if it's a thumbnail request
+    if (isThumbnail && libraryManager) {
+        QString cachedFileName = libraryManager->getCacheFileNameFromInfo(filePath);
+        if (!cachedFileName.isEmpty()) {
+            QString cacheDir = libraryManager->currentLibraryThumbnailCachePath();
+            QString cacheFilePath = QDir(cacheDir).filePath(cachedFileName);
+
+            if (QFile::exists(cacheFilePath)) {
+                pixmap.load(cacheFilePath);
+                if (!pixmap.isNull()) {
+                    qDebug() << "Loaded thumbnail from info.prinfo cache: " << cacheFilePath;
+                    return pixmap; // Return immediately if cached thumbnail is valid
+                } else {
+                    qWarning() << "Failed to load cached thumbnail from info.prinfo, re-generating: " << cacheFilePath;
+                    // If loading from cache failed, proceed to generate and re-cache
+                }
+            } else {
+                qWarning() << "Cached thumbnail file not found on disk, re-generating: " << cacheFilePath;
+                // If cache file is missing, proceed to generate and re-cache
+            }
+        }
+    }
+
+    // If not a thumbnail request, or cache lookup failed, proceed with loading from source
     // First, try loading with Qt's native support for common formats
-    QPixmap pixmap(filePath);
+    pixmap.load(filePath);
     if (!pixmap.isNull()) {
+        if (isThumbnail && libraryManager) {
+            // Scale pixmap before saving to cache
+            QPixmap scaledPixmap = pixmap.scaled(pixmap.width() * THUMBNAIL_CACHE_HEIGHT / pixmap.height(),
+                                                 THUMBNAIL_CACHE_HEIGHT,
+                                                 Qt::KeepAspectRatio,
+                                                 Qt::SmoothTransformation);
+
+            // Save to cache if it was a thumbnail and successfully loaded
+            QString newCacheFileName = libraryManager->getCacheFileName(filePath);
+            QString cacheDir = libraryManager->currentLibraryThumbnailCachePath();
+            QString cacheFilePath = QDir(cacheDir).filePath(newCacheFileName);
+            QDir().mkpath(cacheDir); // Ensure cache directory exists
+            scaledPixmap.save(cacheFilePath, "JPG", 80); // Save as JPG with 80% quality
+            libraryManager->addCacheEntryToInfo(filePath, newCacheFileName); // Record in info.prinfo
+            qDebug() << "Saved generated thumbnail (Qt native) to cache and info.prinfo: " << cacheFilePath;
+            return scaledPixmap; // Return the scaled pixmap
+        }
         return pixmap;
     }
 
@@ -158,39 +203,51 @@ QPixmap MainWindow::loadPixmapFromFile(const QString &filePath, bool isThumbnail
     QString lowerPath = filePath.toLower();
     if (lowerPath.endsWith(".cr2") || lowerPath.endsWith(".nef") || lowerPath.endsWith(".arw") || lowerPath.endsWith(".dng")) {
         LibRaw rawProcessor;
+        QPixmap rawPixmap; // Use a separate pixmap for raw processing results
 
-        // --- PERFORMANCE OPTIMIZATION FOR THUMBNAILS ---
+        // --- PERFORMANCE OPTIMIZATION FOR THUMBNAILS (Embedded Preview) ---
         if (isThumbnail) {
-            if (rawProcessor.open_file(filePath.toStdString().c_str()) != LIBRAW_SUCCESS) {
-                return QPixmap();
-            }
-            // Unpack the embedded preview, which is much faster
-            if (rawProcessor.unpack_thumb() != LIBRAW_SUCCESS) {
-                rawProcessor.recycle();
-                // Fallback to full processing if no thumbnail is found could be added here
-                return QPixmap();
-            }
+            if (rawProcessor.open_file(filePath.toStdString().c_str()) == LIBRAW_SUCCESS) {
+                if (rawProcessor.unpack_thumb() == LIBRAW_SUCCESS) {
+                    libraw_processed_image_t *thumb = rawProcessor.dcraw_make_mem_thumb();
+                    if(thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
+                        rawPixmap.loadFromData(thumb->data, thumb->data_size);
+                        LibRaw::dcraw_clear_mem(thumb);
+                        rawProcessor.recycle();
 
-            libraw_processed_image_t *thumb = rawProcessor.dcraw_make_mem_thumb();
-            if(thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
-                QPixmap thumb_pixmap;
-                thumb_pixmap.loadFromData(thumb->data, thumb->data_size);
-                LibRaw::dcraw_clear_mem(thumb);
-                rawProcessor.recycle();
-                return thumb_pixmap;
+                        if (!rawPixmap.isNull() && libraryManager) {
+                            // Scale pixmap before saving to cache
+                            QPixmap scaledPixmap = rawPixmap.scaled(rawPixmap.width() * THUMBNAIL_CACHE_HEIGHT / rawPixmap.height(),
+                                                                     THUMBNAIL_CACHE_HEIGHT,
+                                                                     Qt::KeepAspectRatio,
+                                                                     Qt::SmoothTransformation);
+
+                            // Save to cache
+                            QString newCacheFileName = libraryManager->getCacheFileName(filePath);
+                            QString cacheDir = libraryManager->currentLibraryThumbnailCachePath();
+                            QString cacheFilePath = QDir(cacheDir).filePath(newCacheFileName);
+                            QDir().mkpath(cacheDir); // Ensure cache directory exists
+                            scaledPixmap.save(cacheFilePath, "JPG", 80); // Save as JPG with 80% quality
+                            libraryManager->addCacheEntryToInfo(filePath, newCacheFileName); // Record in info.prinfo
+                            qDebug() << "Saved generated raw embedded thumbnail to cache and info.prinfo: " << cacheFilePath;
+                            return scaledPixmap; // Return embedded thumbnail
+                        }
+                    }
+                    if(thumb) LibRaw::dcraw_clear_mem(thumb);
+                }
+                rawProcessor.recycle(); // Ensure recycle is called even if unpack_thumb fails
             }
-            if(thumb) LibRaw::dcraw_clear_mem(thumb);
-            // Fallback if thumb is not JPEG
+            qWarning() << "LibRaw: Embedded thumbnail extraction failed or not JPEG, falling back to full processing for thumbnail: " << filePath;
         }
 
-        // --- FULL IMAGE LOADING WITH WHITE BALANCE CORRECTION ---
+        // --- FULL IMAGE LOADING WITH WHITE BALANCE CORRECTION (or fallback for thumbnails) ---
         if (rawProcessor.open_file(filePath.toStdString().c_str()) != LIBRAW_SUCCESS) {
-            qWarning() << "LibRaw: Failed to open raw file:" << filePath;
+            qWarning() << "LibRaw: Failed to open raw file: " << filePath;
             return QPixmap();
         }
 
         if (rawProcessor.unpack() != LIBRAW_SUCCESS) {
-            qWarning() << "LibRaw: Failed to unpack raw data:" << filePath;
+            qWarning() << "LibRaw: Failed to unpack raw data: " << filePath;
             return QPixmap();
         }
 
@@ -206,13 +263,13 @@ QPixmap MainWindow::loadPixmapFromFile(const QString &filePath, bool isThumbnail
         rawProcessor.imgdata.params.user_qual = 1;
 
         if (rawProcessor.dcraw_process() != LIBRAW_SUCCESS) {
-            qWarning() << "LibRaw: Failed to process raw data:" << filePath;
+            qWarning() << "LibRaw: Failed to process raw data: " << filePath;
             return QPixmap();
         }
 
         libraw_processed_image_t *processed_image = rawProcessor.dcraw_make_mem_image();
         if (!processed_image) {
-            qWarning() << "LibRaw: Failed to create in-memory image:" << filePath;
+            qWarning() << "LibRaw: Failed to create in-memory image: " << filePath;
             return QPixmap();
         }
 
@@ -221,16 +278,33 @@ QPixmap MainWindow::loadPixmapFromFile(const QString &filePath, bool isThumbnail
                       processed_image->height,
                       QImage::Format_RGB888);
 
-        // --- FIX: Remove rgbSwapped() as LibRaw already provides data in RGB order ---
-        pixmap = QPixmap::fromImage(qImage);
+        rawPixmap = QPixmap::fromImage(qImage);
 
         LibRaw::dcraw_clear_mem(processed_image);
         rawProcessor.recycle();
 
-        return pixmap;
+        if (isThumbnail && !rawPixmap.isNull() && libraryManager) {
+            // Scale pixmap before saving to cache
+            QPixmap scaledPixmap = rawPixmap.scaled(rawPixmap.width() * THUMBNAIL_CACHE_HEIGHT / rawPixmap.height(),
+                                                     THUMBNAIL_CACHE_HEIGHT,
+                                                     Qt::KeepAspectRatio,
+                                                     Qt::SmoothTransformation);
+
+            // Save to cache if it was a thumbnail and successfully loaded (fallback path)
+            QString newCacheFileName = libraryManager->getCacheFileName(filePath);
+            QString cacheDir = libraryManager->currentLibraryThumbnailCachePath();
+            QString cacheFilePath = QDir(cacheDir).filePath(newCacheFileName);
+            QDir().mkpath(cacheDir); // Ensure cache directory exists
+            scaledPixmap.save(cacheFilePath, "JPG", 80); // Save as JPG with 80% quality
+            libraryManager->addCacheEntryToInfo(filePath, newCacheFileName); // Record in info.prinfo
+            qDebug() << "Saved generated raw (fallback) thumbnail to cache and info.prinfo: " << cacheFilePath;
+            return scaledPixmap; // Return the scaled pixmap
+        }
+
+        return rawPixmap;
     }
 
-    return pixmap; // Return null pixmap if not a recognized format
+    return QPixmap(); // Return null pixmap if not a recognized format and not handled by LibRaw
 }
 
 void MainWindow::updateDevelopImage()
@@ -286,7 +360,7 @@ void MainWindow::onThumbnailDoubleClicked()
     m_imageProcessor->clearCache();
 
     // Load the full quality image with white balance correction
-    m_originalPixmap = loadPixmapFromFile(filePath, false);
+    m_originalPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
     m_currentPixmap = m_originalPixmap;
 
     if (m_currentPixmap.isNull()) {
@@ -323,7 +397,7 @@ void MainWindow::onImageStripThumbnailClicked()
     m_imageProcessor->clearCache();
 
     // Load the full quality image with white balance correction
-    m_originalPixmap = loadPixmapFromFile(filePath, false);
+    m_originalPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
     m_currentPixmap = m_originalPixmap;
 
     if (m_currentPixmap.isNull()) {
@@ -433,7 +507,7 @@ void MainWindow::populateLibrary(const QString &folderPath)
                 qWarning() << "Skipping invalid or non-existent file:" << filePath;
                 continue; // Skip this file
             }
-            QPixmap pix = loadPixmapFromFile(filePath, true);
+            QPixmap pix = loadPixmapFromFile(filePath, true, m_libraryManager);
             if(!pix.isNull()) {
                 // Safely emit signal to update GUI on the main thread
                 emit thumbnailLoaded(filePath, pix);
@@ -673,7 +747,7 @@ void MainWindow::on_actionImport_triggered() {
     }
 
     qDebug() << "Selected" << filesToImport.size() << "files. Opening ImportPreviewDialog.";
-    ImportPreviewDialog dialog(filesToImport, this);
+    ImportPreviewDialog dialog(filesToImport, this, m_libraryManager);
     if (dialog.exec() == QDialog::Accepted) {
         qDebug() << "ImportPreviewDialog accepted. Processing import.";
         ImportPreviewDialog::ImportMode mode = dialog.importMode();

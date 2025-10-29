@@ -19,6 +19,8 @@ public:
     QString currentLibraryThumbnailPath() const;
     QString currentLibraryPrerenderPath() const;
     QString currentLibraryRootPath() const { return m_currentLibraryPath; }
+    QString getCacheFileName(const QString &originalFilePath) const;
+    QString currentLibraryThumbnailCachePath() const;
 
 signals:
     void libraryOpened(const QString &libraryPath);
@@ -26,8 +28,15 @@ signals:
 
 private:
     QString m_currentLibraryPath;
+    QHash<QString, QString> m_thumbnailCacheMap;
 
     bool isValidLibrary(const QString &libraryPath) const;
+    void loadThumbnailCacheMap();
+    void saveThumbnailCacheMap();
+
+public:
+    QString getCacheFileNameFromInfo(const QString &originalFilePath) const;
+    void addCacheEntryToInfo(const QString &originalFilePath, const QString &cacheFileName);
 };
 
 #endif // LIBRARYMANAGER_H
