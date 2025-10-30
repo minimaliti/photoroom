@@ -52,6 +52,7 @@ public slots:
     void onThumbnailClicked(QMouseEvent *event);
     void onThumbnailDoubleClicked();
     void onThumbnailReady(const QString &filePath, const QPixmap &pixmap);
+    void onFullImageReady(const QString &filePath, const QPixmap &pixmap);
     void applyAdjustments();
 
     void showLibraryPage();
@@ -60,6 +61,7 @@ public slots:
 
 signals:
     void thumbnailLoaded(const QString &filePath, const QPixmap &pixmap);
+    void fullImageLoaded(const QString &filePath, const QPixmap &pixmap);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -113,6 +115,7 @@ private:
     void saveSidecarFile(const QString &imagePath, const ImageAdjustments &adjustments);
     ImageAdjustments loadSidecarFile(const QString &imagePath);
     void updateAdjustmentSliders();
+    void setAdjustmentSlidersEnabled(bool enabled);
 };
 
 #endif // MAINWINDOW_H

@@ -114,6 +114,19 @@ void MainWindow::updateAdjustmentSliders() {
     ui->vibranceSlider->setValue(m_adjustments.vibrance / 2 + 50);
 }
 
+void MainWindow::setAdjustmentSlidersEnabled(bool enabled)
+{
+    ui->whitesSlider->setEnabled(enabled);
+    ui->exposureSlider->setEnabled(enabled);
+    ui->contrastSlider->setEnabled(enabled);
+    ui->blacksSlider->setEnabled(enabled);
+    ui->highlightsSlider->setEnabled(enabled);
+    ui->shadowsSlider->setEnabled(enabled);
+    ui->highlightRolloffSlider->setEnabled(enabled);
+    ui->claritySlider->setEnabled(enabled);
+    ui->vibranceSlider->setEnabled(enabled);
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -170,6 +183,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     connect(this, &MainWindow::thumbnailLoaded, this, &MainWindow::onThumbnailReady);
+    connect(this, &MainWindow::fullImageLoaded, this, &MainWindow::onFullImageReady);
 
     // Connect the sliders to the applyAdjustments slot
     connect(ui->whitesSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
@@ -438,7 +452,7 @@ void MainWindow::onThumbnailDoubleClicked()
     if (filePath.isEmpty()) return;
 
     // If the requested image is already loaded, just switch to the develop page
-    if (!m_currentPixmap.isNull() && m_currentDevelopImagePath == filePath) {
+    if (!m_currentDevelopImagePath.isEmpty() && m_currentDevelopImagePath == filePath) {
         ui->stackedWidget->setCurrentWidget(ui->developPage);
         return; // Avoid reloading the same image
     }
@@ -450,22 +464,31 @@ void MainWindow::onThumbnailDoubleClicked()
 
     m_imageProcessor->clearCache();
 
-    // Load the full quality image with white balance correction
-    m_originalPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
-    m_currentPixmap = m_originalPixmap;
-
-    if (m_currentPixmap.isNull()) {
-        qWarning() << "Failed to load image from path:" << filePath;
-        ui->developImageLabel->setText("Failed to load image.");
-        m_currentDevelopImagePath.clear(); // Clear path if loading failed
+    // 1. Load and display thumbnail immediately
+    QPixmap thumbnailPixmap = loadPixmapFromFile(filePath, true, m_libraryManager);
+    if (thumbnailPixmap.isNull()) {
+        qWarning() << "Failed to load thumbnail for:" << filePath;
+        ui->developImageLabel->setText("Failed to load thumbnail.");
+        m_currentDevelopImagePath.clear();
         return;
     }
 
-    m_currentDevelopImagePath = filePath; // Store the path of the newly loaded image
-    m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
-    updateAdjustmentSliders();
-    ui->stackedWidget->setCurrentWidget(ui->developPage);
+    m_currentDevelopImagePath = filePath; // Set path immediately for consistency
+    m_originalPixmap = thumbnailPixmap; // Temporarily store thumbnail as original
+    m_currentPixmap = thumbnailPixmap;
     updateDevelopImage();
+    ui->stackedWidget->setCurrentWidget(ui->developPage);
+
+    // 2. Disable adjustment sliders
+    setAdjustmentSlidersEnabled(false);
+
+    // 3. Asynchronously load the full quality image
+    QtConcurrent::run([this, filePath]() {
+        QPixmap fullPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
+        if (!fullPixmap.isNull()) {
+            emit fullImageLoaded(filePath, fullPixmap);
+        }
+    });
 }
 
 void MainWindow::onImageStripThumbnailClicked()
@@ -477,7 +500,7 @@ void MainWindow::onImageStripThumbnailClicked()
     if (filePath.isEmpty()) return;
 
     // If the requested image is already loaded, just switch to the develop page
-    if (!m_currentPixmap.isNull() && m_currentDevelopImagePath == filePath) {
+    if (!m_currentDevelopImagePath.isEmpty() && m_currentDevelopImagePath == filePath) {
         ui->stackedWidget->setCurrentWidget(ui->developPage);
         return; // Avoid reloading the same image
     }
@@ -489,22 +512,31 @@ void MainWindow::onImageStripThumbnailClicked()
 
     m_imageProcessor->clearCache();
 
-    // Load the full quality image with white balance correction
-    m_originalPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
-    m_currentPixmap = m_originalPixmap;
-
-    if (m_currentPixmap.isNull()) {
-        qWarning() << "Failed to load image from path:" << filePath;
-        ui->developImageLabel->setText("Failed to load image.");
-        m_currentDevelopImagePath.clear(); // Clear path if loading failed
+    // 1. Load and display thumbnail immediately
+    QPixmap thumbnailPixmap = loadPixmapFromFile(filePath, true, m_libraryManager);
+    if (thumbnailPixmap.isNull()) {
+        qWarning() << "Failed to load thumbnail for:" << filePath;
+        ui->developImageLabel->setText("Failed to load thumbnail.");
+        m_currentDevelopImagePath.clear();
         return;
     }
 
-    m_currentDevelopImagePath = filePath; // Store the path of the newly loaded image
-    m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
-    updateAdjustmentSliders();
-    ui->stackedWidget->setCurrentWidget(ui->developPage);
+    m_currentDevelopImagePath = filePath; // Set path immediately for consistency
+    m_originalPixmap = thumbnailPixmap; // Temporarily store thumbnail as original
+    m_currentPixmap = thumbnailPixmap;
     updateDevelopImage();
+    ui->stackedWidget->setCurrentWidget(ui->developPage);
+
+    // 2. Disable adjustment sliders
+    setAdjustmentSlidersEnabled(false);
+
+    // 3. Asynchronously load the full quality image
+    QtConcurrent::run([this, filePath]() {
+        QPixmap fullPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
+        if (!fullPixmap.isNull()) {
+            emit fullImageLoaded(filePath, fullPixmap);
+        }
+    });
 }
 
 
@@ -532,6 +564,26 @@ void MainWindow::onThumbnailReady(const QString &filePath, const QPixmap &pixmap
             break;
         }
     }
+}
+
+void MainWindow::onFullImageReady(const QString &filePath, const QPixmap &pixmap)
+{
+    if (pixmap.isNull()) {
+        qWarning() << "Full image ready but pixmap is null for:" << filePath;
+        ui->developImageLabel->setText("Failed to load full image.");
+        setAdjustmentSlidersEnabled(true); // Re-enable sliders even on failure
+        return;
+    }
+
+    m_originalPixmap = pixmap;
+    m_currentPixmap = m_originalPixmap; // Start with original, then apply adjustments
+    m_currentDevelopImagePath = filePath;
+
+    m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
+    updateAdjustmentSliders();
+    setAdjustmentSlidersEnabled(true);
+    updateDevelopImage();
+    qDebug() << "Full image loaded and displayed for:" << filePath;
 }
 
 void MainWindow::populateLibrary(const QString &folderPath)
