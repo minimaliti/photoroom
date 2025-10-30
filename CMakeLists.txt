@@ -30,6 +30,8 @@ set(PROJECT_SOURCES
         importpreviewdialog.h
         importpreviewdialog.cpp
         importpreviewdialog.ui
+        draggablelineedit.h
+        draggablelineedit.cpp
 )
 
 # Since we require Qt6 above, we can use qt_add_executable directly
@@ -64,6 +66,7 @@ if(NOT LIBRAW_LIBRARY)
 else()
     message(STATUS "Found LibRaw library: ${LIBRAW_LIBRARY}")
     target_include_directories(photoroom PRIVATE ${LIBRAW_DIR}/include)
+    target_include_directories(photoroom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(photoroom PRIVATE ${LIBRAW_LIBRARY})
 endif()
 

@@ -23,10 +23,12 @@
 #include <libraw/libraw.h>
 #include "imageprocessor.h"
 #include "importpreviewdialog.h"
+#include <QScrollBar>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
 #include <QSettings>
+#include "draggablelineedit.h"
 
 // Helper to get sidecar path
 QString getSidecarPath(const QString &imagePath) {
@@ -105,14 +107,23 @@ ImageAdjustments MainWindow::loadSidecarFile(const QString &imagePath) {
 void MainWindow::updateAdjustmentSliders() {
     // Convert adjustment values back to slider range (0-100)
     ui->whitesSlider->setValue(m_adjustments.brightness / 2 + 50);
+    ui->whitesValueLineEdit->setText(QString::number(m_adjustments.brightness));
     ui->exposureSlider->setValue(m_adjustments.exposure / 2 + 50);
+    ui->exposureValueLineEdit->setText(QString::number(m_adjustments.exposure));
     ui->contrastSlider->setValue(m_adjustments.contrast / 2 + 50);
+    ui->contrastValueLineEdit->setText(QString::number(m_adjustments.contrast));
     ui->blacksSlider->setValue(m_adjustments.blacks / 2 + 50);
+    ui->blacksValueLineEdit->setText(QString::number(m_adjustments.blacks));
     ui->highlightsSlider->setValue(m_adjustments.highlights / 2 + 50);
+    ui->highlightsValueLineEdit->setText(QString::number(m_adjustments.highlights));
     ui->shadowsSlider->setValue(m_adjustments.shadows / 2 + 50);
+    ui->shadowsValueLineEdit->setText(QString::number(m_adjustments.shadows));
     ui->highlightRolloffSlider->setValue(m_adjustments.highlightRolloff / 2 + 50);
+    ui->highlightRolloffValueLineEdit->setText(QString::number(m_adjustments.highlightRolloff));
     ui->claritySlider->setValue(m_adjustments.clarity / 2 + 50);
+    ui->clarityValueLineEdit->setText(QString::number(m_adjustments.clarity));
     ui->vibranceSlider->setValue(m_adjustments.vibrance / 2 + 50);
+    ui->vibranceValueLineEdit->setText(QString::number(m_adjustments.vibrance));
 }
 
 void MainWindow::setAdjustmentSlidersEnabled(bool enabled)
@@ -172,6 +183,9 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    ui->imageStripWidgetContents->setMaximumHeight(85);
+    ui->imageStripScrollArea->installEventFilter(this);
 
     m_settings = new QSettings("minimaliti", "photoroom", this);
 
@@ -233,14 +247,54 @@ MainWindow::MainWindow(QWidget *parent)
     // Connect the sliders to the applyAdjustments slot
     connect(ui->whitesSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
     connect(ui->exposureSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->exposureSlider, &QSlider::valueChanged, [this](int value) { ui->exposureValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->contrastSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->contrastSlider, &QSlider::valueChanged, [this](int value) { ui->contrastValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->blacksSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->blacksSlider, &QSlider::valueChanged, [this](int value) { ui->blacksValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->highlightsSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->highlightsSlider, &QSlider::valueChanged, [this](int value) { ui->highlightsValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->shadowsSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->shadowsSlider, &QSlider::valueChanged, [this](int value) { ui->shadowsValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->highlightRolloffSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->highlightRolloffSlider, &QSlider::valueChanged, [this](int value) { ui->highlightRolloffValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->claritySlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->claritySlider, &QSlider::valueChanged, [this](int value) { ui->clarityValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->vibranceSlider, &QSlider::valueChanged, this, &MainWindow::applyAdjustments);
+    connect(ui->vibranceSlider, &QSlider::valueChanged, [this](int value) { ui->vibranceValueLineEdit->setText(QString::number((value - 50) * 2)); });
     connect(ui->threadCountSlider, &QSlider::valueChanged, this, &MainWindow::onThreadCountSliderChanged);
+    connect(ui->threadCountSlider, &QSlider::valueChanged, [this](int value) { ui->threadCountValueLineEdit->setText(QString::number(value)); });
+
+    connect(ui->exposureValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->exposureSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->contrastValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->contrastSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->highlightsValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->highlightsSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->shadowsValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->shadowsSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->whitesValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->whitesSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->blacksValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->blacksSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->clarityValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->claritySlider->setValue(value / 2 + 50);
+    });
+    connect(ui->vibranceValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->vibranceSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->highlightRolloffValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->highlightRolloffSlider->setValue(value / 2 + 50);
+    });
+    connect(ui->threadCountValueLineEdit, &DraggableLineEdit::valueChanged, this, [this](int value) {
+        ui->threadCountSlider->setValue(value);
+    });
 
     ui->whitesSlider->setValue(50);
     ui->exposureSlider->setValue(50);
@@ -252,6 +306,18 @@ MainWindow::MainWindow(QWidget *parent)
     ui->claritySlider->setValue(50);
     ui->vibranceSlider->setValue(50);
     ui->threadCountSlider->setValue(4);
+
+    // Initialize slider value labels
+    ui->exposureValueLineEdit->setText(QString::number((ui->exposureSlider->value() - 50) * 2));
+    ui->contrastValueLineEdit->setText(QString::number((ui->contrastSlider->value() - 50) * 2));
+    ui->highlightsValueLineEdit->setText(QString::number((ui->highlightsSlider->value() - 50) * 2));
+    ui->shadowsValueLineEdit->setText(QString::number((ui->shadowsSlider->value() - 50) * 2));
+    ui->whitesValueLineEdit->setText(QString::number((ui->whitesSlider->value() - 50) * 2));
+    ui->blacksValueLineEdit->setText(QString::number((ui->blacksSlider->value() - 50) * 2));
+    ui->clarityValueLineEdit->setText(QString::number((ui->claritySlider->value() - 50) * 2));
+    ui->vibranceValueLineEdit->setText(QString::number((ui->vibranceSlider->value() - 50) * 2));
+    ui->highlightRolloffValueLineEdit->setText(QString::number((ui->highlightRolloffSlider->value() - 50) * 2));
+
 
     m_adjustmentTimer = new QTimer(this);
     m_adjustmentTimer->setSingleShot(true);
@@ -1127,4 +1193,19 @@ void MainWindow::on_actionPreferences_triggered()
 {
     PreferencesDialog dialog(this);
     dialog.exec();
+}
+
+bool MainWindow::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == ui->imageStripScrollArea && event->type() == QEvent::Wheel) {
+        QWheelEvent *wheelEvent = static_cast<QWheelEvent*>(event);
+        QScrollBar *hScrollBar = ui->imageStripScrollArea->horizontalScrollBar();
+
+        if (hScrollBar) { // No need to check isVisible() as we want to scroll even if bar is not shown
+            int delta = wheelEvent->angleDelta().y();
+            hScrollBar->setValue(hScrollBar->value() - delta);
+            return true; // Event handled
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }

@@ -108,7 +108,7 @@
            <widget class="QScrollArea" name="sidebarScrollArea">
             <property name="maximumSize">
              <size>
-              <width>280</width>
+              <width>350</width>
               <height>16777215</height>
              </size>
             </property>
@@ -133,7 +133,7 @@
                 <property name="title">
                  <string>Basic</string>
                 </property>
-                <layout class="QFormLayout" name="formLayout">
+                <layout class="QGridLayout" name="gridLayout_basic">
                  <item row="0" column="0">
                   <widget class="QLabel" name="label">
                    <property name="text">
@@ -145,6 +145,16 @@
                   <widget class="QSlider" name="exposureSlider">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="2">
+                  <widget class="DraggableLineEdit" name="exposureValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -162,6 +172,16 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="1" column="2">
+                  <widget class="DraggableLineEdit" name="contrastValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
+                   </property>
+                  </widget>
+                 </item>
                  <item row="2" column="0">
                   <widget class="QLabel" name="label_3">
                    <property name="text">
@@ -173,6 +193,16 @@
                   <widget class="QSlider" name="highlightsSlider">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="2">
+                  <widget class="DraggableLineEdit" name="highlightsValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -190,6 +220,16 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="3" column="2">
+                  <widget class="DraggableLineEdit" name="shadowsValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
+                   </property>
+                  </widget>
+                 </item>
                  <item row="4" column="0">
                   <widget class="QLabel" name="label_5">
                    <property name="text">
@@ -201,6 +241,16 @@
                   <widget class="QSlider" name="whitesSlider">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="4" column="2">
+                  <widget class="DraggableLineEdit" name="whitesValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -218,6 +268,16 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="5" column="2">
+                  <widget class="DraggableLineEdit" name="blacksValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
+                   </property>
+                  </widget>
+                 </item>
                 </layout>
                </widget>
               </item>
@@ -226,7 +286,7 @@
                 <property name="title">
                  <string>Presence</string>
                 </property>
-                <layout class="QFormLayout" name="formLayout_2">
+                <layout class="QGridLayout" name="gridLayout_presence">
                  <item row="0" column="0">
                   <widget class="QLabel" name="label_7">
                    <property name="text">
@@ -238,6 +298,16 @@
                   <widget class="QSlider" name="claritySlider">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="2">
+                  <widget class="DraggableLineEdit" name="clarityValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -255,6 +325,16 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="1" column="2">
+                  <widget class="DraggableLineEdit" name="vibranceValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
+                   </property>
+                  </widget>
+                 </item>
                 </layout>
                </widget>
               </item>
@@ -263,7 +343,7 @@
                 <property name="title">
                  <string>misc</string>
                 </property>
-                <layout class="QFormLayout" name="formLayout_3">
+                <layout class="QGridLayout" name="gridLayout_misc">
                  <item row="0" column="0">
                   <widget class="QLabel" name="label_8">
                    <property name="text">
@@ -275,6 +355,16 @@
                   <widget class="QSlider" name="highlightRolloffSlider">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="2">
+                  <widget class="DraggableLineEdit" name="highlightRolloffValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -295,6 +385,16 @@
                    </property>
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="2">
+                  <widget class="DraggableLineEdit" name="threadCountValueLineEdit">
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                   <property name="fixedWidth">
+                    <number>40</number>
                    </property>
                   </widget>
                  </item>
@@ -334,6 +434,9 @@
             <height>100</height>
            </size>
           </property>
+          <property name="horizontalScrollBarPolicy">
+           <enum>Qt::ScrollBarPolicy::ScrollBarAsNeeded</enum>
+          </property>
           <property name="verticalScrollBarPolicy">
            <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
           </property>
@@ -348,6 +451,12 @@
              <width>98</width>
              <height>98</height>
             </rect>
+           </property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
            </property>
            <layout class="QHBoxLayout" name="imageStripLayout">
             <property name="spacing">
@@ -583,4 +692,12 @@
  </widget>
  <resources/>
  <connections/>
+ <customwidgets>
+  <customwidget>
+   <class>DraggableLineEdit</class>
+   <extends>QLineEdit</extends>
+   <header>draggablelineedit.h</header>
+   <container>true</container>
+  </customwidget>
+ </customwidgets>
 </ui>

@@ -64,6 +64,7 @@ signals:
     void fullImageLoaded(const QString &filePath, const QPixmap &pixmap);
 
 protected:
+    bool eventFilter(QObject *obj, QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
 private:
