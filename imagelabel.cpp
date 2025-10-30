@@ -8,8 +8,6 @@ ImageLabel::ImageLabel(QWidget *parent) : QLabel(parent)
     // providing size hints and allowing it to be resized properly within the grid.
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setAlignment(Qt::AlignCenter); // Center the pixmap within the label.
-
-    setFixedHeight(130);
 }
 
 void ImageLabel::setLoading(bool loading)

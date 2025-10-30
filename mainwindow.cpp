@@ -677,7 +677,6 @@ void MainWindow::populateLibrary(const QString &folderPath)
         ImageLabel *thumb = new ImageLabel(ui->scrollAreaWidgetContents);
         thumb->setProperty("filePath", filePath);
         thumb->setStyleSheet("border: 1px solid #444; background-color: #222;");
-        thumb->setMinimumSize(120, 120);
         thumb->setLoading(true); // Show loading indicator
         connect(thumb, &ImageLabel::clicked, this, &MainWindow::onThumbnailClicked);
         connect(thumb, &ImageLabel::doubleClicked, this, &MainWindow::onThumbnailDoubleClicked);
@@ -729,7 +728,6 @@ void MainWindow::updateImageGrid()
     // Clear existing items from the layout without deleting the widgets
     QLayoutItem* item;
     while ((item = layout->takeAt(0)) != nullptr) {
-        // Do not delete item->widget() here, as widgets are managed by thumbnailWidgets list
         delete item;
     }
 
@@ -742,35 +740,54 @@ void MainWindow::updateImageGrid()
     }
 
     int spacing = layout->spacing();
-    int thumbnailWidth = 160; // The desired width for your thumbnails
+    int desiredThumbnailWidth = 200; // Desired width for thumbnails
+    int rowHeightUnit = 20; // Define a base unit for row height in the grid
 
-    // Use the viewport's width, which correctly accounts for a potential vertical scrollbar
     int viewportWidth = ui->scrollArea->viewport()->width();
+    int numCols = qMax(1, (viewportWidth - spacing) / (desiredThumbnailWidth + spacing));
+    int columnWidth = (viewportWidth - (numCols + 1) * spacing) / numCols;
 
-    // Calculate the number of columns that can fit in the current width
-    int maxCols = qMax(1, (viewportWidth - spacing) / (thumbnailWidth + spacing));
+    QVector<int> columnCurrentRow(numCols, 0); // Track the current row index for each column
 
-    int row = 0;
-    int col = 0;
-
-    // Rearrange all the thumbnail widgets into the new grid configuration.
     for (ImageLabel* thumb : this->thumbnailWidgets) {
-        layout->addWidget(thumb, row, col);
-        col++;
-        if (col >= maxCols) {
-            col = 0;
-            row++;
+        int targetCol = 0;
+        int minRow = columnCurrentRow[0];
+        for (int i = 1; i < numCols; ++i) {
+            if (columnCurrentRow[i] < minRow) {
+                minRow = columnCurrentRow[i];
+                targetCol = i;
+            }
         }
+
+        QPixmap pix = thumb->pixmap();
+        int scaledHeight = desiredThumbnailWidth; // Default if no pixmap
+        if (!pix.isNull()) {
+            scaledHeight = pix.height() * columnWidth / pix.width();
+        }
+
+        // Calculate row span based on scaled height and rowHeightUnit
+        int rowSpan = qMax(1, (scaledHeight + spacing) / rowHeightUnit);
+
+        thumb->setFixedSize(columnWidth, scaledHeight);
+        layout->addWidget(thumb, columnCurrentRow[targetCol], targetCol, rowSpan, 1);
+        columnCurrentRow[targetCol] += rowSpan; // Advance the row for this column
     }
 
-    // --- Control Expansion: Push everything to the top-left ---
+    // Add column stretches to distribute space evenly
+    for (int i = 0; i < numCols; ++i) {
+        layout->setColumnStretch(i, 1);
+    }
 
-    // Add a stretching column to take up all remaining horizontal space
-    layout->setColumnStretch(maxCols, 1);
-    // Add a stretching row to take up all remaining vertical space
-    layout->setRowStretch(row + 1, 1);
+    // Add a row stretch at the end of the longest column to push everything to the top
+    int maxRow = 0;
+    for (int row : columnCurrentRow) {
+        if (row > maxRow) {
+            maxRow = row;
+        }
+    }
+    layout->setRowStretch(maxRow, 1);
 
-    qDebug() << "Rearranged grid with" << maxCols << "columns.";
+    qDebug() << "Rearranged grid with" << numCols << "columns.";
 }
 
 void MainWindow::updateImageStrip()
