@@ -669,6 +669,7 @@ void MainWindow::populateLibrary(const QString &folderPath)
     }
 
     QList<QString> filePathsToLoad; // Collect file paths for concurrent loading
+    int imageIdCounter = 0;
     for (const QFileInfo &fileInfo : this->imageFiles) {
         QString filePath = fileInfo.absoluteFilePath();
         filePathsToLoad.append(filePath);
@@ -678,6 +679,7 @@ void MainWindow::populateLibrary(const QString &folderPath)
         thumb->setProperty("filePath", filePath);
         thumb->setStyleSheet("border: 1px solid #444; background-color: #222;");
         thumb->setLoading(true); // Show loading indicator
+        thumb->setImageId(imageIdCounter + 1); // Set the image ID
         connect(thumb, &ImageLabel::clicked, this, &MainWindow::onThumbnailClicked);
         connect(thumb, &ImageLabel::doubleClicked, this, &MainWindow::onThumbnailDoubleClicked);
         this->thumbnailWidgets.append(thumb);
@@ -689,9 +691,12 @@ void MainWindow::populateLibrary(const QString &folderPath)
         stripThumb->setFixedSize(80, 80);
         stripThumb->setStyleSheet("border: 1px solid #444; background-color: #222;");
         stripThumb->setLoading(true); // Show loading indicator
+        stripThumb->setImageId(imageIdCounter + 1); // Set the image ID
         connect(stripThumb, &ImageLabel::clicked, this, &MainWindow::onImageStripThumbnailClicked);
         this->m_imageStripThumbnails.append(stripThumb);
         qDebug() << "Created image strip thumbnail for:" << filePath;
+
+        imageIdCounter++;
     }
 
     // Arrange placeholders immediately
