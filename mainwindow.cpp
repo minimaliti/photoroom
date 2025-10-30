@@ -616,13 +616,16 @@ void MainWindow::onFullImageReady(const QString &filePath, const QPixmap &pixmap
     }
 
     m_originalPixmap = pixmap;
-    m_currentPixmap = m_originalPixmap; // Start with original, then apply adjustments
     m_currentDevelopImagePath = filePath;
 
+    // Load adjustments from sidecar file
     m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
     updateAdjustmentSliders();
+
+    // Apply adjustments immediately and update the display
+    delayedApplyAdjustments();
+
     setAdjustmentSlidersEnabled(true);
-    updateDevelopImage();
     qDebug() << "Full image loaded and displayed for:" << filePath;
 }
 
