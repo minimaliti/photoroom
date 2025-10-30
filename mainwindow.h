@@ -116,6 +116,7 @@ private:
     ImageAdjustments loadSidecarFile(const QString &imagePath);
     void updateAdjustmentSliders();
     void setAdjustmentSlidersEnabled(bool enabled);
+    void saveAdjustedThumbnailToCache(const QString &filePath, const QPixmap &adjustedPixmap);
 };
 
 #endif // MAINWINDOW_H

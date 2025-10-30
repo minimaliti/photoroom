@@ -127,6 +127,45 @@ void MainWindow::setAdjustmentSlidersEnabled(bool enabled)
     ui->vibranceSlider->setEnabled(enabled);
 }
 
+void MainWindow::saveAdjustedThumbnailToCache(const QString &filePath, const QPixmap &adjustedPixmap)
+{
+    if (adjustedPixmap.isNull() || filePath.isEmpty() || !m_libraryManager) {
+        qWarning() << "Cannot save adjusted thumbnail: invalid pixmap, file path, or library manager.";
+        return;
+    }
+
+    const int THUMBNAIL_CACHE_HEIGHT = 360; // Same height as used in loadPixmapFromFile
+
+    QPixmap scaledPixmap = adjustedPixmap.scaled(adjustedPixmap.width() * THUMBNAIL_CACHE_HEIGHT / adjustedPixmap.height(),
+                                                 THUMBNAIL_CACHE_HEIGHT,
+                                                 Qt::KeepAspectRatio,
+                                                 Qt::SmoothTransformation);
+
+    QString newCacheFileName = m_libraryManager->getCacheFileName(filePath);
+    QString cacheDir = m_libraryManager->currentLibraryThumbnailCachePath();
+    QString cacheFilePath = QDir(cacheDir).filePath(newCacheFileName);
+    QDir().mkpath(cacheDir); // Ensure cache directory exists
+    scaledPixmap.save(cacheFilePath, "JPG", 80); // Save as JPG with 80% quality
+    m_libraryManager->addCacheEntryToInfo(filePath, newCacheFileName); // Record in info.prinfo
+    qDebug() << "Saved adjusted thumbnail to cache and info.prinfo:" << cacheFilePath;
+
+    // Update the thumbnail in the image strip if it's currently displayed
+    for (ImageLabel* stripThumb : this->m_imageStripThumbnails) {
+        if (stripThumb->property("filePath").toString() == filePath) {
+            stripThumb->setPixmap(scaledPixmap.scaled(80, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            break;
+        }
+    }
+
+    // Update the thumbnail in the main grid if it's currently displayed
+    for (ImageLabel* thumbLabel : this->thumbnailWidgets) {
+        if (thumbLabel->property("filePath").toString() == filePath) {
+            thumbLabel->setPixmap(scaledPixmap);
+            break;
+        }
+    }
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -243,6 +282,7 @@ void MainWindow::delayedApplyAdjustments()
     m_currentPixmap = m_imageProcessor->applyAdjustments(m_originalPixmap, m_adjustments);
     updateDevelopImage();
     saveSidecarFile(m_currentDevelopImagePath, m_adjustments);
+    saveAdjustedThumbnailToCache(m_currentDevelopImagePath, m_currentPixmap);
 }
 
 // This function can now load either a fast thumbnail or a full-quality image
