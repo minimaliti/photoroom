@@ -94,6 +94,7 @@ private:
 private slots:
     void delayedApplyAdjustments();
     void onThreadCountSliderChanged(int value);
+    void onProcessingFinished(const QPixmap &pixmap);
 
     void populateLibrary(const QString &folderPath);
     void updateImageGrid();

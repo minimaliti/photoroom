@@ -251,6 +251,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_adjustmentTimer->setSingleShot(true);
     m_adjustmentTimer->setInterval(200); // 200ms delay
     connect(m_adjustmentTimer, &QTimer::timeout, this, &MainWindow::delayedApplyAdjustments);
+    connect(m_imageProcessor, &ImageProcessor::processingFinished, this, &MainWindow::onProcessingFinished);
+}
+
+void MainWindow::onProcessingFinished(const QPixmap &pixmap)
+{
+    m_currentPixmap = pixmap;
+    updateDevelopImage();
+    saveSidecarFile(m_currentDevelopImagePath, m_adjustments);
+    saveAdjustedThumbnailToCache(m_currentDevelopImagePath, m_currentPixmap);
 }
 
 void MainWindow::onThreadCountSliderChanged(int value)
@@ -279,10 +288,7 @@ void MainWindow::delayedApplyAdjustments()
     m_adjustments.clarity = (ui->claritySlider->value() - 50) * 2;
     m_adjustments.vibrance = (ui->vibranceSlider->value() - 50) * 2;
 
-    m_currentPixmap = m_imageProcessor->applyAdjustments(m_originalPixmap, m_adjustments);
-    updateDevelopImage();
-    saveSidecarFile(m_currentDevelopImagePath, m_adjustments);
-    saveAdjustedThumbnailToCache(m_currentDevelopImagePath, m_currentPixmap);
+    m_imageProcessor->applyAdjustments(m_originalPixmap, m_adjustments);
 }
 
 // This function can now load either a fast thumbnail or a full-quality image

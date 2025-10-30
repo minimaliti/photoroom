@@ -2,10 +2,11 @@
 #include <QImage>
 #include <QColor>
 #include <QtConcurrent/QtConcurrent>
+#include <QRunnable>
 
 ImageProcessor::ImageProcessor(QObject *parent) : QObject(parent)
 {
-
+    m_threadPool.setMaxThreadCount(m_threadCount);
 }
 
 void ImageProcessor::clearCache()
@@ -16,28 +17,30 @@ void ImageProcessor::clearCache()
 void ImageProcessor::setThreadCount(int count)
 {
     m_threadCount = count;
+    m_threadPool.setMaxThreadCount(m_threadCount);
 }
 
-QPixmap ImageProcessor::applyAdjustments(const QPixmap &pixmap, const ImageAdjustments &adjustments)
+void ImageProcessor::applyAdjustments(const QPixmap &pixmap, const ImageAdjustments &adjustments)
 {
     if (pixmap.isNull()) {
-        return QPixmap();
+        emit processingFinished(QPixmap());
+        return;
     }
 
-    QImage image = pixmap.toImage();
-    QImage resultImage(image.size(), image.format());
+    QtConcurrent::run([this, pixmap, adjustments]() {
+        QImage image = pixmap.toImage();
+        QImage resultImage(image.size(), image.format());
 
-    int stripHeight = image.height() / m_threadCount;
-    QList<QFuture<QImage>> futures;
+        int stripHeight = image.height() / m_threadCount;
+        QList<QImage> strips;
+        for (int i = 0; i < m_threadCount; ++i) {
+            int yStart = i * stripHeight;
+            int yEnd = (i == m_threadCount - 1) ? image.height() : (i + 1) * stripHeight;
+            strips.append(image.copy(0, yStart, image.width(), yEnd - yStart));
+        }
 
-    for (int i = 0; i < m_threadCount; ++i) {
-        int yStart = i * stripHeight;
-        int yEnd = (i == m_threadCount - 1) ? image.height() : (i + 1) * stripHeight;
-        QImage strip = image.copy(0, yStart, image.width(), yEnd - yStart);
-
-        futures.append(QtConcurrent::run([this, strip, adjustments]() {
+        QFuture<QImage> future = QtConcurrent::mapped(strips, [this, adjustments](QImage strip) {
             QImage processedStrip = strip;
-
             applyExposure(processedStrip, adjustments.exposure);
             applyContrast(processedStrip, adjustments.contrast);
             applyBrightness(processedStrip, adjustments.brightness);
@@ -47,21 +50,23 @@ QPixmap ImageProcessor::applyAdjustments(const QPixmap &pixmap, const ImageAdjus
             applyHighlightRolloff(processedStrip, adjustments.highlightRolloff);
             applyClarity(processedStrip, adjustments.clarity);
             applyVibrance(processedStrip, adjustments.vibrance);
-
             return processedStrip;
-        }));
-    }
+        });
 
-    for (int i = 0; i < futures.size(); ++i) {
-        int yStart = i * stripHeight;
-        QImage processedStrip = futures[i].result();
-        for (int y = 0; y < processedStrip.height(); ++y) {
-            memcpy(resultImage.scanLine(yStart + y), processedStrip.constScanLine(y), processedStrip.bytesPerLine());
+        future.waitForFinished();
+
+        QList<QImage> processedStrips = future.results();
+        for (int i = 0; i < processedStrips.size(); ++i) {
+            int yStart = i * stripHeight;
+            for (int y = 0; y < processedStrips[i].height(); ++y) {
+                memcpy(resultImage.scanLine(yStart + y), processedStrips[i].constScanLine(y), processedStrips[i].bytesPerLine());
+            }
         }
-    }
 
-    return QPixmap::fromImage(resultImage);
+        emit processingFinished(QPixmap::fromImage(resultImage));
+    });
 }
+
 
 void ImageProcessor::applyBrightness(QImage &image, int brightness)
 {
@@ -306,5 +311,36 @@ void ImageProcessor::applyVibrance(QImage &image, int vibrance)
             color.setHsv(h, qBound(0, s_new, 255), v);
             line[x] = color.rgb();
         }
+    }
+}
+
+ImageProcessingTask::ImageProcessingTask(ImageProcessor *processor, QImage strip, ImageAdjustments adjustments, QImage *resultImage, int yOffset, QSharedPointer<QAtomicInt> runningTasks)
+    : m_processor(processor),
+      m_strip(strip),
+      m_adjustments(adjustments),
+      m_resultImage(resultImage),
+      m_yOffset(yOffset),
+      m_runningTasks(runningTasks)
+{
+}
+
+void ImageProcessingTask::run()
+{
+    m_processor->applyExposure(m_strip, m_adjustments.exposure);
+    m_processor->applyContrast(m_strip, m_adjustments.contrast);
+    m_processor->applyBrightness(m_strip, m_adjustments.brightness);
+    m_processor->applyBlacks(m_strip, m_adjustments.blacks);
+    m_processor->applyHighlights(m_strip, m_adjustments.highlights);
+    m_processor->applyShadows(m_strip, m_adjustments.shadows);
+    m_processor->applyHighlightRolloff(m_strip, m_adjustments.highlightRolloff);
+    m_processor->applyClarity(m_strip, m_adjustments.clarity);
+    m_processor->applyVibrance(m_strip, m_adjustments.vibrance);
+
+    for (int y = 0; y < m_strip.height(); ++y) {
+        memcpy(m_resultImage->scanLine(m_yOffset + y), m_strip.constScanLine(y), m_strip.bytesPerLine());
+    }
+
+    if (m_runningTasks->fetchAndAddOrdered(-1) == 1) {
+        emit m_processor->processingFinished(QPixmap::fromImage(*m_resultImage));
     }
 }
