@@ -66,7 +66,7 @@ void ImportPreviewDialog::loadThumbnails()
     }
 
     QFuture<void> future = QtConcurrent::map(m_imagePaths, [this](const QString &filePath) {
-        QPixmap pix = MainWindow::loadPixmapFromFile(filePath, true, m_libraryManager);
+        QPixmap pix = MainWindow::loadPixmapFromFile(filePath, true, nullptr); // Pass nullptr to prevent caching
         if(!pix.isNull()) {
             QMetaObject::invokeMethod(this, "onThumbnailLoaded", Qt::QueuedConnection,
                                       Q_ARG(QString, filePath),

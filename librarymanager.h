@@ -4,6 +4,20 @@
 #include <QObject>
 #include <QString>
 #include <QDir>
+#include <QList>
+#include <QDateTime>
+#include <QJsonObject>
+#include <QHash>
+
+struct PhotoInfo {
+    int photo_id = 0;
+    QString file_path; // Path relative to library root
+    QDateTime date_taken;
+    QString cache_file_path;
+
+    void write(QJsonObject &json) const;
+    void read(const QJsonObject &json);
+};
 
 class LibraryManager : public QObject
 {
@@ -22,21 +36,23 @@ public:
     QString getCacheFileName(const QString &originalFilePath) const;
     QString currentLibraryThumbnailCachePath() const;
 
+    void addImportedFile(const QString &originalFilePath, const QString &libraryFilePath);
+    QString getCacheFileNameFromInfo(const QString &libraryFilePath) const;
+    void addCacheEntryToInfo(const QString &libraryFilePath, const QString &cacheFileName);
+
 signals:
     void libraryOpened(const QString &libraryPath);
     void error(const QString &message);
 
 private:
     QString m_currentLibraryPath;
-    QHash<QString, QString> m_thumbnailCacheMap;
+    QList<PhotoInfo> m_photos;
+    QHash<QString, int> m_photoPathMap; // key: relative file path, value: index in m_photos
+    int m_lastPhotoId = 0;
 
     bool isValidLibrary(const QString &libraryPath) const;
-    void loadThumbnailCacheMap();
-    void saveThumbnailCacheMap();
-
-public:
-    QString getCacheFileNameFromInfo(const QString &originalFilePath) const;
-    void addCacheEntryToInfo(const QString &originalFilePath, const QString &cacheFileName);
+    void loadInfo();
+    void saveInfo();
 };
 
 #endif // LIBRARYMANAGER_H
