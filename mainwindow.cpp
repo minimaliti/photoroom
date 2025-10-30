@@ -23,6 +23,96 @@
 #include <libraw/libraw.h>
 #include "imageprocessor.h"
 #include "importpreviewdialog.h"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
+
+// Helper to get sidecar path
+QString getSidecarPath(const QString &imagePath) {
+    return imagePath + ".json";
+}
+
+void MainWindow::saveSidecarFile(const QString &imagePath, const ImageAdjustments &adjustments) {
+    if (imagePath.isEmpty()) {
+        qWarning() << "Cannot save sidecar: imagePath is empty.";
+        return;
+    }
+
+    QJsonObject json;
+    json["brightness"] = adjustments.brightness;
+    json["exposure"] = adjustments.exposure;
+    json["contrast"] = adjustments.contrast;
+    json["blacks"] = adjustments.blacks;
+    json["highlights"] = adjustments.highlights;
+    json["shadows"] = adjustments.shadows;
+    json["highlightRolloff"] = adjustments.highlightRolloff;
+    json["clarity"] = adjustments.clarity;
+    json["vibrance"] = adjustments.vibrance;
+
+    QJsonDocument doc(json);
+    QString sidecarFilePath = getSidecarPath(imagePath);
+    QFile file(sidecarFilePath);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(doc.toJson());
+        file.close();
+        qDebug() << "Sidecar saved:" << sidecarFilePath;
+    } else {
+        qWarning() << "Failed to save sidecar file:" << sidecarFilePath << file.errorString();
+    }
+}
+
+ImageAdjustments MainWindow::loadSidecarFile(const QString &imagePath) {
+    ImageAdjustments adjustments;
+    if (imagePath.isEmpty()) {
+        qWarning() << "Cannot load sidecar: imagePath is empty.";
+        return adjustments;
+    }
+
+    QString sidecarFilePath = getSidecarPath(imagePath);
+    QFile file(sidecarFilePath);
+    if (!file.exists()) {
+        qDebug() << "No sidecar found for:" << imagePath;
+        return adjustments; // Return default adjustments if no sidecar
+    }
+
+    if (file.open(QIODevice::ReadOnly)) {
+        QByteArray jsonData = file.readAll();
+        file.close();
+
+        QJsonDocument doc = QJsonDocument::fromJson(jsonData);
+        if (doc.isObject()) {
+            QJsonObject json = doc.object();
+            adjustments.brightness = json["brightness"].toInt(adjustments.brightness);
+            adjustments.exposure = json["exposure"].toInt(adjustments.exposure);
+            adjustments.contrast = json["contrast"].toInt(adjustments.contrast);
+            adjustments.blacks = json["blacks"].toInt(adjustments.blacks);
+            adjustments.highlights = json["highlights"].toInt(adjustments.highlights);
+            adjustments.shadows = json["shadows"].toInt(adjustments.shadows);
+            adjustments.highlightRolloff = json["highlightRolloff"].toInt(adjustments.highlightRolloff);
+            adjustments.clarity = json["clarity"].toInt(adjustments.clarity);
+            adjustments.vibrance = json["vibrance"].toInt(adjustments.vibrance);
+            qDebug() << "Sidecar loaded for:" << imagePath;
+        } else {
+            qWarning() << "Sidecar file is not a valid JSON object:" << sidecarFilePath;
+        }
+    } else {
+        qWarning() << "Failed to open sidecar file for reading:" << sidecarFilePath << file.errorString();
+    }
+    return adjustments;
+}
+
+void MainWindow::updateAdjustmentSliders() {
+    // Convert adjustment values back to slider range (0-100)
+    ui->whitesSlider->setValue(m_adjustments.brightness / 2 + 50);
+    ui->exposureSlider->setValue(m_adjustments.exposure / 2 + 50);
+    ui->contrastSlider->setValue(m_adjustments.contrast / 2 + 50);
+    ui->blacksSlider->setValue(m_adjustments.blacks / 2 + 50);
+    ui->highlightsSlider->setValue(m_adjustments.highlights / 2 + 50);
+    ui->shadowsSlider->setValue(m_adjustments.shadows / 2 + 50);
+    ui->highlightRolloffSlider->setValue(m_adjustments.highlightRolloff / 2 + 50);
+    ui->claritySlider->setValue(m_adjustments.clarity / 2 + 50);
+    ui->vibranceSlider->setValue(m_adjustments.vibrance / 2 + 50);
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -138,6 +228,7 @@ void MainWindow::delayedApplyAdjustments()
 
     m_currentPixmap = m_imageProcessor->applyAdjustments(m_originalPixmap, m_adjustments);
     updateDevelopImage();
+    saveSidecarFile(m_currentDevelopImagePath, m_adjustments);
 }
 
 // This function can now load either a fast thumbnail or a full-quality image
@@ -371,6 +462,8 @@ void MainWindow::onThumbnailDoubleClicked()
     }
 
     m_currentDevelopImagePath = filePath; // Store the path of the newly loaded image
+    m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
+    updateAdjustmentSliders();
     ui->stackedWidget->setCurrentWidget(ui->developPage);
     updateDevelopImage();
 }
@@ -408,6 +501,8 @@ void MainWindow::onImageStripThumbnailClicked()
     }
 
     m_currentDevelopImagePath = filePath; // Store the path of the newly loaded image
+    m_adjustments = loadSidecarFile(m_currentDevelopImagePath);
+    updateAdjustmentSliders();
     ui->stackedWidget->setCurrentWidget(ui->developPage);
     updateDevelopImage();
 }

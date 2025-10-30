@@ -108,6 +108,11 @@ private:
     LibraryManager *m_libraryManager;
 
     QStringList findImageFilesInDirectory(const QString &folderPath);
+
+    // Sidecar file handling
+    void saveSidecarFile(const QString &imagePath, const ImageAdjustments &adjustments);
+    ImageAdjustments loadSidecarFile(const QString &imagePath);
+    void updateAdjustmentSliders();
 };
 
 #endif // MAINWINDOW_H
