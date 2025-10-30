@@ -118,6 +118,15 @@ private:
     void updateAdjustmentSliders();
     void setAdjustmentSlidersEnabled(bool enabled);
     void saveAdjustedThumbnailToCache(const QString &filePath, const QPixmap &adjustedPixmap);
+
+    QSettings* m_settings;
+    QList<QString> m_recentLibraries;
+
+    void loadRecentLibraries();
+    void saveRecentLibraries();
+    void updateRecentLibrariesMenu();
+    void openRecentLibrary();
+    void addRecentLibrary(const QString &path);
 };
 
 #endif // MAINWINDOW_H

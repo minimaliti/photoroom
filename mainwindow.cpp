@@ -26,6 +26,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
+#include <QSettings>
 
 // Helper to get sidecar path
 QString getSidecarPath(const QString &imagePath) {
@@ -172,10 +173,15 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
+    m_settings = new QSettings("minimaliti", "photoroom", this);
+
     m_imageProcessor = new ImageProcessor(this);
     m_libraryManager = new LibraryManager(this);
 
     connect(m_libraryManager, &LibraryManager::error, this, &MainWindow::onLibraryError);
+
+    loadRecentLibraries();
+    updateRecentLibrariesMenu();
 
     // Initialize default library on startup
     QString defaultLibraryPath = m_libraryManager->getDefaultLibraryPath();
@@ -888,6 +894,55 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
+void MainWindow::loadRecentLibraries()
+{
+    m_recentLibraries = m_settings->value("recentLibraries").toStringList();
+}
+
+void MainWindow::saveRecentLibraries()
+{
+    m_settings->setValue("recentLibraries", m_recentLibraries);
+}
+
+void MainWindow::addRecentLibrary(const QString &path)
+{
+    m_recentLibraries.removeAll(path);
+    m_recentLibraries.prepend(path);
+    while (m_recentLibraries.size() > 10) { // Keep max 10 recent libraries
+        m_recentLibraries.removeLast();
+    }
+    saveRecentLibraries();
+    updateRecentLibrariesMenu();
+}
+
+void MainWindow::updateRecentLibrariesMenu()
+{
+    ui->menuRecent_Libraries->clear();
+    for (const QString &path : qAsConst(m_recentLibraries)) {
+        QString displayName = QDir(path).dirName();
+        if (displayName.endsWith(".prlibrary", Qt::CaseInsensitive)) {
+            displayName.chop(QString(".prlibrary").length());
+        }
+        QAction *action = ui->menuRecent_Libraries->addAction(displayName);
+        action->setData(path);
+        connect(action, &QAction::triggered, this, &MainWindow::openRecentLibrary);
+    }
+    ui->menuRecent_Libraries->setEnabled(!m_recentLibraries.isEmpty());
+}
+
+void MainWindow::openRecentLibrary()
+{
+    QAction *action = qobject_cast<QAction*>(sender());
+    if (action) {
+        QString path = action->data().toString();
+        if (m_libraryManager->openLibrary(path)) {
+            populateLibrary(m_libraryManager->currentLibraryImportPath());
+            ui->stackedWidget->setCurrentIndex(0);
+            addRecentLibrary(path); // Re-add to move to top of recents
+        }
+    }
+}
+
 // Menubar
 void MainWindow::on_actionExit_triggered()
 {
@@ -906,6 +961,7 @@ void MainWindow::on_actionNew_Library_triggered()
         if (m_libraryManager->openLibrary(newLibraryPath)) {
             populateLibrary(m_libraryManager->currentLibraryImportPath());
             ui->stackedWidget->setCurrentIndex(0);
+            addRecentLibrary(newLibraryPath);
         }
     }
 }
@@ -918,11 +974,16 @@ void MainWindow::on_actionOpen_Library_triggered()
         if (m_libraryManager->openLibrary(folder)) {
             this->populateLibrary(m_libraryManager->currentLibraryImportPath());
             ui->stackedWidget->setCurrentIndex(0);
+            addRecentLibrary(folder);
         }
     }
 }
 
-void MainWindow::on_actionClear_recents_triggered(){ }
+void MainWindow::on_actionClear_recents_triggered(){
+    m_recentLibraries.clear();
+    saveRecentLibraries();
+    updateRecentLibrariesMenu();
+}
 void MainWindow::on_actionUndo_triggered(){ }
 void MainWindow::on_actionRedo_triggered(){ }
 void MainWindow::on_actionCut_triggered(){ }
