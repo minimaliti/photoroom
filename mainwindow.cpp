@@ -20,6 +20,7 @@
 #include "imagelabel.h"
 #include <QMouseEvent>
 #include <QtConcurrent/QtConcurrent>
+#include <QThreadPool>
 #include <libraw/libraw.h>
 #include "imageprocessor.h"
 #include "importpreviewdialog.h"
@@ -546,6 +547,13 @@ void MainWindow::updateDevelopImage()
 
 void MainWindow::showLibraryPage() {
     ui->stackedWidget->setCurrentWidget(ui->libraryPage);
+    // Force update the grid when switching to library page to fix sizing issues
+    if (!this->imageFiles.isEmpty()) {
+        // Use QTimer::singleShot to ensure the viewport is properly sized after the page switch
+        QTimer::singleShot(0, this, [this]() {
+            this->updateImageGrid();
+        });
+    }
 }
 
 void MainWindow::showDevelopPage() {
@@ -604,7 +612,7 @@ void MainWindow::onThumbnailDoubleClicked()
     setAdjustmentSlidersEnabled(false);
 
     // 3. Asynchronously load the full quality image
-    QtConcurrent::run([this, filePath]() {
+    QThreadPool::globalInstance()->start([this, filePath]() {
         QPixmap fullPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
         if (!fullPixmap.isNull()) {
             emit fullImageLoaded(filePath, fullPixmap);
@@ -652,7 +660,7 @@ void MainWindow::onImageStripThumbnailClicked()
     setAdjustmentSlidersEnabled(false);
 
     // 3. Asynchronously load the full quality image
-    QtConcurrent::run([this, filePath]() {
+    QThreadPool::globalInstance()->start([this, filePath]() {
         QPixmap fullPixmap = loadPixmapFromFile(filePath, false, m_libraryManager);
         if (!fullPixmap.isNull()) {
             emit fullImageLoaded(filePath, fullPixmap);
@@ -1003,7 +1011,7 @@ void MainWindow::openRecentLibrary()
         QString path = action->data().toString();
         if (m_libraryManager->openLibrary(path)) {
             populateLibrary(m_libraryManager->currentLibraryImportPath());
-            ui->stackedWidget->setCurrentIndex(0);
+            showLibraryPage();
             addRecentLibrary(path); // Re-add to move to top of recents
         }
     }
@@ -1039,7 +1047,7 @@ void MainWindow::on_actionOpen_Library_triggered()
     if (!folder.isEmpty()) {
         if (m_libraryManager->openLibrary(folder)) {
             this->populateLibrary(m_libraryManager->currentLibraryImportPath());
-            ui->stackedWidget->setCurrentIndex(0);
+            showLibraryPage();
             addRecentLibrary(folder);
         }
     }

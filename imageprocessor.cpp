@@ -27,7 +27,7 @@ void ImageProcessor::applyAdjustments(const QPixmap &pixmap, const ImageAdjustme
         return;
     }
 
-    QtConcurrent::run([this, pixmap, adjustments]() {
+    m_threadPool.start([this, pixmap, adjustments]() {
         QImage image = pixmap.toImage();
         QImage resultImage(image.size(), image.format());
 
