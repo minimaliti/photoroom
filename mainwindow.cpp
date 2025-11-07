@@ -2,17 +2,40 @@
 #include "./ui_mainwindow.h"
 #include "preferencesdialog.h"
 #include "librarygridview.h"
+#include "histogramwidget.h"
 
 #include <QAction>
+#include <QAbstractItemView>
+#include <QColor>
+#include <QComboBox>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGraphicsView>
 #include <QImage>
 #include <QImageReader>
 #include <QLabel>
+#include <QIcon>
+#include <QLocale>
+#include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPushButton>
+#include <QRegularExpression>
+#include <QTransform>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QColorSpace>
+#endif
+#include <QtConcurrent/QtConcurrentRun>
+#include <QtGlobal>
+#include <QFuture>
+#include <algorithm>
+#include <cmath>
+#include <utility>
 #include <QPixmap>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QToolBar>
@@ -20,6 +43,113 @@
 #include <QWidget>
 
 #include "imageloader.h"
+
+namespace {
+
+constexpr int kHistogramBins = 256;
+constexpr int kHistogramTargetSampleCount = 750000;
+
+HistogramData computeHistogram(const QImage &sourceImage)
+{
+    HistogramData histogram;
+    histogram.red.fill(0, kHistogramBins);
+    histogram.green.fill(0, kHistogramBins);
+    histogram.blue.fill(0, kHistogramBins);
+    histogram.luminance.fill(0, kHistogramBins);
+
+    if (sourceImage.isNull()) {
+        return histogram;
+    }
+
+    QImage image = sourceImage;
+    if (image.format() != QImage::Format_RGBA8888 &&
+        image.format() != QImage::Format_RGB888 &&
+        image.format() != QImage::Format_RGB32) {
+        image = image.convertToFormat(QImage::Format_RGB32);
+    }
+
+    const int width = image.width();
+    const int height = image.height();
+    const int totalPixels = width * height;
+
+    int strideStep = 1;
+    if (totalPixels > kHistogramTargetSampleCount) {
+        const double factor = std::sqrt(static_cast<double>(totalPixels) /
+                                        static_cast<double>(kHistogramTargetSampleCount));
+        strideStep = qBound(1, static_cast<int>(factor), 16);
+    }
+
+    const bool isRgb32 = image.format() == QImage::Format_RGB32;
+    const bool isRgb888 = image.format() == QImage::Format_RGB888;
+
+    for (int y = 0; y < height; y += strideStep) {
+        const uchar *line = image.constScanLine(y);
+        if (!line) {
+            continue;
+        }
+
+        for (int x = 0; x < width; x += strideStep) {
+            int r = 0;
+            int g = 0;
+            int b = 0;
+
+            if (isRgb32) {
+                const QRgb *pixels = reinterpret_cast<const QRgb *>(line);
+                const QRgb pixel = pixels[x];
+                r = qRed(pixel);
+                g = qGreen(pixel);
+                b = qBlue(pixel);
+            } else if (isRgb888) {
+                const uchar *pixel = line + (x * 3);
+                r = pixel[0];
+                g = pixel[1];
+                b = pixel[2];
+            } else {
+                const QRgb *pixels = reinterpret_cast<const QRgb *>(line);
+                const QRgb pixel = pixels[x];
+                r = qRed(pixel);
+                g = qGreen(pixel);
+                b = qBlue(pixel);
+            }
+
+            const int luminance = qBound(0, qGray(r, g, b), 255);
+
+            histogram.red[r]++;
+            histogram.green[g]++;
+            histogram.blue[b]++;
+            histogram.luminance[luminance]++;
+
+            histogram.maxValue = std::max({histogram.maxValue,
+                                           histogram.red[r],
+                                           histogram.green[g],
+                                           histogram.blue[b],
+                                           histogram.luminance[luminance]});
+        }
+    }
+
+    return histogram;
+}
+
+DevelopImageLoadResult loadDevelopImageAsync(int requestId, qint64 assetId, const QString &filePath)
+{
+    DevelopImageLoadResult result;
+    result.requestId = requestId;
+    result.assetId = assetId;
+    result.filePath = filePath;
+
+    QString loadError;
+    QImage image = ImageLoader::loadImageWithRawSupport(filePath, &loadError);
+    if (image.isNull()) {
+        result.errorMessage = loadError.isEmpty() ? QObject::tr("Failed to load image.") : loadError;
+        return result;
+    }
+
+    result.image = image;
+    result.histogram = computeHistogram(image);
+    return result;
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -40,10 +170,68 @@ MainWindow::MainWindow(QWidget *parent)
         ui->libraryGridLayout->addWidget(m_libraryGridView);
     }
 
-    // --- NEW: Configure the develop page image label ---
-    if (ui->developImageLabel) {
-        ui->developImageLabel->setAlignment(Qt::AlignCenter);
-        ui->developImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_imageLoadWatcher = new QFutureWatcher<DevelopImageLoadResult>(this);
+    connect(m_imageLoadWatcher, &QFutureWatcher<DevelopImageLoadResult>::finished,
+            this, &MainWindow::handleDevelopImageLoaded);
+
+    ensureDevelopViewInitialized();
+
+    if (ui->developFilmstripList) {
+        ui->developFilmstripList->setViewMode(QListView::IconMode);
+        ui->developFilmstripList->setFlow(QListView::LeftToRight);
+        ui->developFilmstripList->setMovement(QListView::Static);
+        ui->developFilmstripList->setWrapping(false);
+        ui->developFilmstripList->setSpacing(8);
+        ui->developFilmstripList->setResizeMode(QListView::Adjust);
+        ui->developFilmstripList->setUniformItemSizes(true);
+        ui->developFilmstripList->setSelectionMode(QAbstractItemView::SingleSelection);
+        ui->developFilmstripList->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        ui->developFilmstripList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        ui->developFilmstripList->setIconSize(QSize(128, 80));
+
+        connect(ui->developFilmstripList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (!item) {
+                return;
+            }
+            const qint64 filmstripAssetId = item->data(Qt::UserRole).toLongLong();
+            const LibraryAsset *asset = assetById(filmstripAssetId);
+            if (!asset) {
+                return;
+            }
+            const QString originalPath = assetOriginalPath(*asset);
+            if (originalPath.isEmpty()) {
+                QMessageBox::warning(this,
+                                     tr("Unable to open image"),
+                                     tr("The selected asset does not have an original file path."));
+                return;
+            }
+            openAssetInDevelop(filmstripAssetId, originalPath);
+        });
+    }
+
+    if (ui->developZoomCombo) {
+        if (ui->developZoomCombo->count() == 0) {
+            ui->developZoomCombo->addItems({tr("Fit"), QStringLiteral("50 %"), QStringLiteral("100 %"), QStringLiteral("200 %"), QStringLiteral("400 %")});
+        }
+        connect(ui->developZoomCombo, &QComboBox::currentTextChanged, this, &MainWindow::applyDevelopZoomPreset);
+    }
+
+    if (ui->developResetAdjustmentsButton) {
+        connect(ui->developResetAdjustmentsButton, &QPushButton::clicked, this, [this]() {
+            showStatusMessage(tr("Reset adjustments (not yet implemented)"), 2000);
+        });
+    }
+
+    if (ui->developToggleBeforeAfterButton) {
+        connect(ui->developToggleBeforeAfterButton, &QPushButton::clicked, this, [this]() {
+            showStatusMessage(tr("Before/After toggle (not yet implemented)"), 2000);
+        });
+    }
+
+    if (ui->developFitButton) {
+        connect(ui->developFitButton, &QPushButton::clicked, this, [this]() {
+            fitDevelopViewToImage();
+        });
     }
 
     // Connect toolbar actions to switch pages
@@ -58,6 +246,147 @@ MainWindow::MainWindow(QWidget *parent)
         ui->actionImport->setEnabled(false);
     }
 
+}
+
+void MainWindow::ensureDevelopViewInitialized()
+{
+    if (m_developScene || !ui->developImageView) {
+        initializeDevelopHistogram();
+        return;
+    }
+
+    m_developScene = new QGraphicsScene(this);
+    m_developScene->setItemIndexMethod(QGraphicsScene::NoIndex);
+    ui->developImageView->setScene(m_developScene);
+    ui->developImageView->setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
+    ui->developImageView->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    ui->developImageView->setDragMode(QGraphicsView::ScrollHandDrag);
+    ui->developImageView->setOptimizationFlags(QGraphicsView::DontSavePainterState | QGraphicsView::DontAdjustForAntialiasing);
+    ui->developImageView->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    ui->developImageView->setResizeAnchor(QGraphicsView::AnchorUnderMouse);
+    ui->developImageView->setBackgroundBrush(QColor(30, 30, 30));
+
+    m_developPixmapItem = m_developScene->addPixmap(QPixmap());
+    m_developPixmapItem->setVisible(false);
+
+    initializeDevelopHistogram();
+}
+
+void MainWindow::initializeDevelopHistogram()
+{
+    if (!ui->developHistogramLayout) {
+        return;
+    }
+
+    if (!m_histogramWidget) {
+        m_histogramWidget = new HistogramWidget(this);
+        m_histogramWidget->setMinimumHeight(180);
+        ui->developHistogramLayout->insertWidget(0, m_histogramWidget);
+    }
+
+    if (ui->developHistogramPlaceholderLabel) {
+        ui->developHistogramPlaceholderLabel->setVisible(m_histogramWidget == nullptr);
+    }
+}
+
+void MainWindow::clearDevelopView()
+{
+    m_currentDevelopAssetId = -1;
+    m_developZoom = 1.0;
+
+    if (m_developPixmapItem) {
+        m_developPixmapItem->setPixmap(QPixmap());
+        m_developPixmapItem->setVisible(false);
+    }
+
+    if (m_developScene) {
+        m_developScene->setSceneRect(QRectF());
+    }
+
+    if (ui->developViewerStack && ui->developPlaceholderWidget) {
+        ui->developViewerStack->setCurrentWidget(ui->developPlaceholderWidget);
+    }
+
+    if (ui->developPlaceholderLabel) {
+        ui->developPlaceholderLabel->setText(tr("Double-click an image in the Library to edit it here."));
+    }
+
+    if (ui->developImageInfoLabel) {
+        ui->developImageInfoLabel->setText(tr("No image selected"));
+    }
+    if (ui->developHistogramHintLabel) {
+        ui->developHistogramHintLabel->setText(tr("Histogram will appear when an image is loaded."));
+    }
+    if (ui->developMetadataFileNameValue) {
+        ui->developMetadataFileNameValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataFileSizeValue) {
+        ui->developMetadataFileSizeValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataResolutionValue) {
+        ui->developMetadataResolutionValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataColorProfileValue) {
+        ui->developMetadataColorProfileValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataBitDepthValue) {
+        ui->developMetadataBitDepthValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataCaptureDateValue) {
+        ui->developMetadataCaptureDateValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developZoomCombo) {
+        QSignalBlocker blocker(ui->developZoomCombo);
+        ui->developZoomCombo->setCurrentIndex(0);
+    }
+    resetHistogram();
+}
+
+void MainWindow::resetHistogram()
+{
+    if (m_histogramWidget) {
+        m_histogramWidget->clear();
+    }
+    if (ui->developHistogramHintLabel) {
+        ui->developHistogramHintLabel->setText(tr("Histogram will appear when an image is loaded."));
+    }
+}
+
+void MainWindow::showDevelopLoadingState(const QString &message)
+{
+    if (ui->developViewerStack && ui->developPlaceholderWidget) {
+        ui->developViewerStack->setCurrentWidget(ui->developPlaceholderWidget);
+    }
+    if (ui->developPlaceholderLabel) {
+        ui->developPlaceholderLabel->setText(message);
+    }
+    if (ui->developImageInfoLabel) {
+        ui->developImageInfoLabel->setText(message);
+    }
+    if (ui->developHistogramHintLabel) {
+        ui->developHistogramHintLabel->setText(tr("Computing histogram…"));
+    }
+    if (m_histogramWidget) {
+        m_histogramWidget->setStatusMessage(tr("Computing histogram…"));
+    }
+}
+
+void MainWindow::updateHistogram(const HistogramData &histogram)
+{
+    if (!m_histogramWidget) {
+        return;
+    }
+
+    if (!histogram.isValid()) {
+        m_histogramWidget->setStatusMessage(tr("Histogram unavailable."));
+        return;
+    }
+
+    m_histogramWidget->setHistogramData(histogram);
+
+    if (ui->developHistogramHintLabel) {
+        ui->developHistogramHintLabel->setText(tr("Histogram generated from current image."));
+    }
 }
 
 void MainWindow::bindLibrarySignals()
@@ -108,6 +437,7 @@ void MainWindow::refreshLibraryView()
     if (!m_libraryManager || !m_libraryManager->hasOpenLibrary()) {
         m_assets.clear();
         m_libraryGridView->clear();
+        updateDevelopFilmstrip();
         return;
     }
 
@@ -126,6 +456,68 @@ void MainWindow::refreshLibraryView()
     }
 
     m_libraryGridView->setItems(items);
+    updateDevelopFilmstrip();
+}
+
+void MainWindow::updateDevelopFilmstrip()
+{
+    if (!ui->developFilmstripList) {
+        return;
+    }
+
+    QSignalBlocker blocker(ui->developFilmstripList);
+    ui->developFilmstripList->clear();
+
+    const QSize iconSize = ui->developFilmstripList->iconSize();
+
+    for (const LibraryAsset &asset : std::as_const(m_assets)) {
+        auto *item = new QListWidgetItem(asset.fileName);
+        item->setData(Qt::UserRole, asset.id);
+        item->setToolTip(asset.fileName);
+
+        const QString previewPath = assetPreviewPath(asset);
+        if (!previewPath.isEmpty()) {
+            QImageReader reader(previewPath);
+            reader.setAutoTransform(true);
+            reader.setScaledSize(iconSize);
+            const QImage thumbnail = reader.read();
+            if (!thumbnail.isNull()) {
+                item->setIcon(QIcon(QPixmap::fromImage(thumbnail)));
+            } else {
+                QPixmap fallback(previewPath);
+                if (!fallback.isNull()) {
+                    item->setIcon(QIcon(fallback.scaled(iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                }
+            }
+        }
+
+        ui->developFilmstripList->addItem(item);
+        if (asset.id == m_currentDevelopAssetId) {
+            item->setSelected(true);
+            ui->developFilmstripList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+        }
+    }
+}
+
+void MainWindow::selectFilmstripItem(qint64 assetId)
+{
+    if (!ui->developFilmstripList) {
+        return;
+    }
+
+    QSignalBlocker blocker(ui->developFilmstripList);
+    for (int row = 0; row < ui->developFilmstripList->count(); ++row) {
+        QListWidgetItem *item = ui->developFilmstripList->item(row);
+        if (!item) {
+            continue;
+        }
+
+        const bool isCurrent = item->data(Qt::UserRole).toLongLong() == assetId;
+        item->setSelected(isCurrent);
+        if (isCurrent) {
+            ui->developFilmstripList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+        }
+    }
 }
 
 void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPath)
@@ -150,6 +542,132 @@ void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPa
     }
 
     m_libraryGridView->updateItemPreview(assetId, previewPath);
+
+    if (ui->developFilmstripList && !previewPath.isEmpty()) {
+        for (int row = 0; row < ui->developFilmstripList->count(); ++row) {
+            QListWidgetItem *item = ui->developFilmstripList->item(row);
+            if (!item) {
+                continue;
+            }
+            if (item->data(Qt::UserRole).toLongLong() == assetId) {
+                QImageReader reader(previewPath);
+                reader.setAutoTransform(true);
+                reader.setScaledSize(ui->developFilmstripList->iconSize());
+                const QImage thumbnail = reader.read();
+                if (!thumbnail.isNull()) {
+                    item->setIcon(QIcon(QPixmap::fromImage(thumbnail)));
+                }
+                break;
+            }
+        }
+    }
+}
+
+void MainWindow::populateDevelopMetadata(const QImage &image, const QString &filePath)
+{
+    QFileInfo info(filePath);
+    const QLocale locale;
+
+    if (ui->developImageInfoLabel) {
+        ui->developImageInfoLabel->setText(tr("%1 • %2 x %3 • %4")
+                                               .arg(info.fileName())
+                                               .arg(image.width())
+                                               .arg(image.height())
+                                               .arg(locale.formattedDataSize(info.size())));
+    }
+
+    if (ui->developMetadataFileNameValue) {
+        ui->developMetadataFileNameValue->setText(info.fileName());
+    }
+    if (ui->developMetadataFileSizeValue) {
+        ui->developMetadataFileSizeValue->setText(locale.formattedDataSize(info.size()));
+    }
+    if (ui->developMetadataResolutionValue) {
+        ui->developMetadataResolutionValue->setText(tr("%1 x %2").arg(image.width()).arg(image.height()));
+    }
+    if (ui->developMetadataColorProfileValue) {
+        QString profileText = tr("Unknown");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        if (image.colorSpace().isValid()) {
+            profileText = image.colorSpace().description();
+        }
+#endif
+        ui->developMetadataColorProfileValue->setText(profileText);
+    }
+    if (ui->developMetadataBitDepthValue) {
+        ui->developMetadataBitDepthValue->setText(tr("%1-bit").arg(image.depth()));
+    }
+    if (ui->developMetadataCaptureDateValue) {
+        const QDateTime captured = info.birthTime().isValid() ? info.birthTime() : info.lastModified();
+        ui->developMetadataCaptureDateValue->setText(locale.toString(captured, QLocale::ShortFormat));
+    }
+
+    if (ui->developHistogramHintLabel) {
+        ui->developHistogramHintLabel->setText(tr("Histogram will update automatically as you adjust the image."));
+    }
+}
+
+const LibraryAsset *MainWindow::assetById(qint64 assetId) const
+{
+    auto it = std::find_if(m_assets.cbegin(), m_assets.cend(), [assetId](const LibraryAsset &asset) {
+        return asset.id == assetId;
+    });
+    if (it == m_assets.cend()) {
+        return nullptr;
+    }
+    return &(*it);
+}
+
+void MainWindow::fitDevelopViewToImage()
+{
+    if (!ui->developImageView || !m_developPixmapItem) {
+        return;
+    }
+    if (m_developPixmapItem->pixmap().isNull()) {
+        return;
+    }
+
+    ui->developImageView->fitInView(m_developPixmapItem, Qt::KeepAspectRatio);
+    m_developZoom = ui->developImageView->transform().m11();
+
+    if (ui->developZoomCombo) {
+        QSignalBlocker blocker(ui->developZoomCombo);
+        ui->developZoomCombo->setCurrentText(tr("Fit"));
+    }
+}
+
+void MainWindow::applyDevelopZoomPreset(const QString &preset)
+{
+    if (!ui->developImageView || !m_developPixmapItem) {
+        return;
+    }
+    if (m_developPixmapItem->pixmap().isNull()) {
+        return;
+    }
+
+    if (preset.compare(tr("Fit"), Qt::CaseInsensitive) == 0) {
+        fitDevelopViewToImage();
+        return;
+    }
+
+    QString normalized = preset;
+    normalized.remove(QRegularExpression(QStringLiteral("[^0-9\\.]")));
+
+    bool ok = false;
+    const double percentage = normalized.toDouble(&ok);
+    if (!ok || percentage <= 0.0) {
+        return;
+    }
+
+    m_developZoom = percentage / 100.0;
+
+    QTransform transform;
+    transform.scale(m_developZoom, m_developZoom);
+    ui->developImageView->setTransform(transform);
+
+    if (ui->developViewerStack && ui->developImageViewPage) {
+        ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
+    }
 }
 
 QString MainWindow::assetPreviewPath(const LibraryAsset &asset) const
@@ -181,12 +699,14 @@ void MainWindow::clearLibrary()
     if (m_libraryGridView) {
         m_libraryGridView->clear();
     }
+    if (ui->developFilmstripList) {
+        ui->developFilmstripList->clear();
+    }
+    clearDevelopView();
 }
 
 void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
 {
-    Q_UNUSED(assetId);
-
     if (filePath.isEmpty()) {
         QMessageBox::warning(this,
                              tr("Unable to open image"),
@@ -194,30 +714,88 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
         return;
     }
 
-    if (!ui->developImageLabel) {
-        qWarning() << "developImageLabel is null! Check mainwindow.ui.";
+    ensureDevelopViewInitialized();
+
+    if (!m_developScene || !m_developPixmapItem) {
+        qWarning() << "Develop view is not initialized.";
         return;
     }
 
-    QString loadError;
-    QImage image = ImageLoader::loadImageWithRawSupport(filePath, &loadError);
-    if (image.isNull()) {
+    selectFilmstripItem(assetId);
+
+    const QString displayName = QFileInfo(filePath).fileName();
+    showDevelopLoadingState(tr("Loading %1…").arg(displayName));
+
+    m_pendingDevelopFilePath = filePath;
+    const int requestId = ++m_pendingDevelopRequestId;
+
+    auto future = QtConcurrent::run(loadDevelopImageAsync, requestId, assetId, filePath);
+    m_imageLoadWatcher->setFuture(future);
+}
+
+void MainWindow::handleDevelopImageLoaded()
+{
+    if (!m_imageLoadWatcher) {
+        return;
+    }
+
+    const DevelopImageLoadResult result = m_imageLoadWatcher->result();
+    if (result.requestId != m_pendingDevelopRequestId ||
+        result.filePath != m_pendingDevelopFilePath) {
+        return;
+    }
+
+    if (!result.errorMessage.isEmpty() || result.image.isNull()) {
         QMessageBox::warning(this,
                              tr("Unable to open image"),
-                             tr("Could not open %1.\n%2").arg(QFileInfo(filePath).fileName(), loadError));
+                             tr("Could not open %1.\n%2")
+                                 .arg(QFileInfo(result.filePath).fileName(),
+                                      result.errorMessage));
+        clearDevelopView();
         return;
     }
 
-    QPixmap pix = QPixmap::fromImage(image);
+    if (!m_developScene || !m_developPixmapItem) {
+        return;
+    }
+
+    const QPixmap pix = QPixmap::fromImage(result.image);
     if (pix.isNull()) {
         QMessageBox::warning(this,
                              tr("Unable to display image"),
-                             tr("Failed to convert %1 to a pixmap for display.").arg(QFileInfo(filePath).fileName()));
+                             tr("Failed to convert %1 to a pixmap for display.")
+                                 .arg(QFileInfo(result.filePath).fileName()));
+        clearDevelopView();
         return;
     }
 
-    ui->developImageLabel->setPixmap(pix);
-    ui->stackedWidget->setCurrentWidget(ui->developPage);
+    m_developPixmapItem->setPixmap(pix);
+    m_developPixmapItem->setVisible(true);
+    m_developScene->setSceneRect(pix.rect());
+
+    if (ui->developViewerStack && ui->developImageViewPage) {
+        ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
+    }
+
+    if (ui->stackedWidget && ui->developPage) {
+        ui->stackedWidget->setCurrentWidget(ui->developPage);
+    }
+
+    fitDevelopViewToImage();
+
+    populateDevelopMetadata(result.image, result.filePath);
+    updateHistogram(result.histogram);
+
+    m_currentDevelopAssetId = result.assetId;
+    selectFilmstripItem(result.assetId);
+
+    if (ui->developZoomCombo) {
+        QSignalBlocker blocker(ui->developZoomCombo);
+        ui->developZoomCombo->setCurrentText(tr("Fit"));
+    }
+
+    showStatusMessage(tr("Loaded %1").arg(QFileInfo(result.filePath).fileName()), 2000);
+    m_pendingDevelopFilePath.clear();
 }
 
 void MainWindow::handleSelectionChanged(const QList<qint64> &selection)

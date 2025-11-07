@@ -32,6 +32,9 @@ set(PROJECT_SOURCES
     librarymanager.h
     previewgenerator.cpp
     previewgenerator.h
+    histogramwidget.cpp
+    histogramwidget.h
+    histogramtypes.h
 )
 
 # Create the executable using the list of sources.

@@ -3,9 +3,16 @@
 
 #include "librarymanager.h"
 
+#include <QGraphicsPixmapItem>
+#include <QFutureWatcher>
+#include <QGraphicsScene>
+#include <QImage>
 #include <QList>
 #include <QMainWindow>
+#include <QString>
 #include <QVector>
+
+#include "histogramtypes.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -14,6 +21,17 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class LibraryGridView;
+class HistogramWidget;
+
+struct DevelopImageLoadResult
+{
+    int requestId = 0;
+    qint64 assetId = -1;
+    QString filePath;
+    QImage image;
+    HistogramData histogram;
+    QString errorMessage;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -43,18 +61,39 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
+    QGraphicsScene *m_developScene = nullptr;
+    QGraphicsPixmapItem *m_developPixmapItem = nullptr;
     LibraryGridView *m_libraryGridView = nullptr;
+    HistogramWidget *m_histogramWidget = nullptr;
 
     QString currentLibraryPath;
     QVector<LibraryAsset> m_assets;
+    qint64 m_currentDevelopAssetId = -1;
+    double m_developZoom = 1.0;
+    int m_pendingDevelopRequestId = 0;
+    QString m_pendingDevelopFilePath;
+    QFutureWatcher<DevelopImageLoadResult> *m_imageLoadWatcher = nullptr;
 
     void clearLibrary();
+    void clearDevelopView();
+    void ensureDevelopViewInitialized();
+    void initializeDevelopHistogram();
     void bindLibrarySignals();
     void refreshLibraryView();
     void updateThumbnailPreview(qint64 assetId, const QString &previewPath);
     QString assetPreviewPath(const LibraryAsset &asset) const;
     QString assetOriginalPath(const LibraryAsset &asset) const;
     void showStatusMessage(const QString &message, int timeoutMs = 3000);
+    void updateDevelopFilmstrip();
+    void populateDevelopMetadata(const QImage &image, const QString &filePath);
+    const LibraryAsset *assetById(qint64 assetId) const;
+    void applyDevelopZoomPreset(const QString &preset);
+    void fitDevelopViewToImage();
+    void showDevelopLoadingState(const QString &message);
+    void handleDevelopImageLoaded();
+    void updateHistogram(const HistogramData &histogram);
+    void resetHistogram();
+    void selectFilmstripItem(qint64 assetId);
 
     LibraryManager *m_libraryManager = nullptr;
 };
