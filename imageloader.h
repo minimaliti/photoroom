@@ -6,6 +6,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "developtypes.h"
+
 namespace ImageLoader {
 
 const QSet<QString>& rawFileExtensions();
@@ -14,6 +16,7 @@ bool isRawFile(const QString &filePath);
 QImage loadRawImage(const QString &filePath, QString *errorMessage = nullptr);
 QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage = nullptr);
 QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage = nullptr);
+bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString *errorMessage = nullptr);
 
 } // namespace ImageLoader
 

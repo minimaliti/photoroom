@@ -3,7 +3,7 @@
 
 #include <QWidget>
 
-#include "histogramtypes.h"
+#include "developtypes.h"
 
 class HistogramWidget : public QWidget
 {

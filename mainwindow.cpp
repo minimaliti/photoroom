@@ -24,6 +24,8 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QResizeEvent>
+#include <QStringList>
 #include <QTransform>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QColorSpace>
@@ -56,6 +58,8 @@ HistogramData computeHistogram(const QImage &sourceImage)
     histogram.green.fill(0, kHistogramBins);
     histogram.blue.fill(0, kHistogramBins);
     histogram.luminance.fill(0, kHistogramBins);
+    histogram.maxValue = 0;
+    histogram.totalSamples = 0;
 
     if (sourceImage.isNull()) {
         return histogram;
@@ -82,6 +86,7 @@ HistogramData computeHistogram(const QImage &sourceImage)
     const bool isRgb32 = image.format() == QImage::Format_RGB32;
     const bool isRgb888 = image.format() == QImage::Format_RGB888;
 
+    int sampleCount = 0;
     for (int y = 0; y < height; y += strideStep) {
         const uchar *line = image.constScanLine(y);
         if (!line) {
@@ -119,6 +124,8 @@ HistogramData computeHistogram(const QImage &sourceImage)
             histogram.blue[b]++;
             histogram.luminance[luminance]++;
 
+            ++sampleCount;
+
             histogram.maxValue = std::max({histogram.maxValue,
                                            histogram.red[r],
                                            histogram.green[g],
@@ -127,6 +134,7 @@ HistogramData computeHistogram(const QImage &sourceImage)
         }
     }
 
+    histogram.totalSamples = sampleCount;
     return histogram;
 }
 
@@ -146,6 +154,7 @@ DevelopImageLoadResult loadDevelopImageAsync(int requestId, qint64 assetId, cons
 
     result.image = image;
     result.histogram = computeHistogram(image);
+    ImageLoader::extractMetadata(filePath, &result.metadata, nullptr);
     return result;
 }
 
@@ -176,6 +185,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     ensureDevelopViewInitialized();
 
+    if (ui->developVerticalSplitter) {
+        ui->developVerticalSplitter->setStretchFactor(0, 1);
+        ui->developVerticalSplitter->setStretchFactor(1, 0);
+        ui->developVerticalSplitter->setCollapsible(0, false);
+        ui->developVerticalSplitter->setCollapsible(1, false);
+    }
+
     if (ui->developFilmstripList) {
         ui->developFilmstripList->setViewMode(QListView::IconMode);
         ui->developFilmstripList->setFlow(QListView::LeftToRight);
@@ -188,6 +204,7 @@ MainWindow::MainWindow(QWidget *parent)
         ui->developFilmstripList->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         ui->developFilmstripList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         ui->developFilmstripList->setIconSize(QSize(128, 80));
+        ui->developFilmstripList->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
         connect(ui->developFilmstripList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
             if (!item) {
@@ -207,6 +224,10 @@ MainWindow::MainWindow(QWidget *parent)
             }
             openAssetInDevelop(filmstripAssetId, originalPath);
         });
+    }
+
+    if (ui->developFilmstripContainer) {
+        ui->developFilmstripContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     }
 
     if (ui->developZoomCombo) {
@@ -293,6 +314,7 @@ void MainWindow::clearDevelopView()
 {
     m_currentDevelopAssetId = -1;
     m_developZoom = 1.0;
+    m_developFitMode = true;
 
     if (m_developPixmapItem) {
         m_developPixmapItem->setPixmap(QPixmap());
@@ -317,20 +339,24 @@ void MainWindow::clearDevelopView()
     if (ui->developHistogramHintLabel) {
         ui->developHistogramHintLabel->setText(tr("Histogram will appear when an image is loaded."));
     }
-    if (ui->developMetadataFileNameValue) {
-        ui->developMetadataFileNameValue->setText(QStringLiteral("—"));
-    }
+    auto resetLabel = [](QLabel *label) {
+        if (label) {
+            label->setText(QStringLiteral("—"));
+        }
+    };
+    resetLabel(ui->developMetadataCameraValue);
+    resetLabel(ui->developMetadataLensValue);
+    resetLabel(ui->developMetadataIsoValue);
+    resetLabel(ui->developMetadataShutterValue);
+    resetLabel(ui->developMetadataApertureValue);
+    resetLabel(ui->developMetadataFocalLengthValue);
+    resetLabel(ui->developMetadataFlashValue);
+    resetLabel(ui->developMetadataFocusDistanceValue);
     if (ui->developMetadataFileSizeValue) {
         ui->developMetadataFileSizeValue->setText(QStringLiteral("—"));
     }
     if (ui->developMetadataResolutionValue) {
         ui->developMetadataResolutionValue->setText(QStringLiteral("—"));
-    }
-    if (ui->developMetadataColorProfileValue) {
-        ui->developMetadataColorProfileValue->setText(QStringLiteral("—"));
-    }
-    if (ui->developMetadataBitDepthValue) {
-        ui->developMetadataBitDepthValue->setText(QStringLiteral("—"));
     }
     if (ui->developMetadataCaptureDateValue) {
         ui->developMetadataCaptureDateValue->setText(QStringLiteral("—"));
@@ -354,6 +380,8 @@ void MainWindow::resetHistogram()
 
 void MainWindow::showDevelopLoadingState(const QString &message)
 {
+    m_developFitMode = true;
+
     if (ui->developViewerStack && ui->developPlaceholderWidget) {
         ui->developViewerStack->setCurrentWidget(ui->developPlaceholderWidget);
     }
@@ -368,6 +396,29 @@ void MainWindow::showDevelopLoadingState(const QString &message)
     }
     if (m_histogramWidget) {
         m_histogramWidget->setStatusMessage(tr("Computing histogram…"));
+    }
+
+    auto resetLabel = [](QLabel *label) {
+        if (label) {
+            label->setText(QStringLiteral("—"));
+        }
+    };
+    resetLabel(ui->developMetadataCameraValue);
+    resetLabel(ui->developMetadataLensValue);
+    resetLabel(ui->developMetadataIsoValue);
+    resetLabel(ui->developMetadataShutterValue);
+    resetLabel(ui->developMetadataApertureValue);
+    resetLabel(ui->developMetadataFocalLengthValue);
+    resetLabel(ui->developMetadataFlashValue);
+    resetLabel(ui->developMetadataFocusDistanceValue);
+    if (ui->developMetadataFileSizeValue) {
+        ui->developMetadataFileSizeValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataResolutionValue) {
+        ui->developMetadataResolutionValue->setText(QStringLiteral("—"));
+    }
+    if (ui->developMetadataCaptureDateValue) {
+        ui->developMetadataCaptureDateValue->setText(QStringLiteral("—"));
     }
 }
 
@@ -385,7 +436,37 @@ void MainWindow::updateHistogram(const HistogramData &histogram)
     m_histogramWidget->setHistogramData(histogram);
 
     if (ui->developHistogramHintLabel) {
-        ui->developHistogramHintLabel->setText(tr("Histogram generated from current image."));
+        QStringList hints;
+        if (histogram.totalSamples > 0) {
+            auto sumRange = [](const QVector<int> &values, int start, int end) {
+                int total = 0;
+                for (int i = start; i <= end && i < values.size(); ++i) {
+                    total += values.at(i);
+                }
+                return total;
+            };
+
+            const QLocale locale;
+            const int shadowCount = sumRange(histogram.luminance, 0, 4);
+            const int highlightCount = sumRange(histogram.luminance, 251, 255);
+            const double shadowRatio = static_cast<double>(shadowCount) / static_cast<double>(histogram.totalSamples);
+            const double highlightRatio = static_cast<double>(highlightCount) / static_cast<double>(histogram.totalSamples);
+
+            if (highlightRatio > 0.05) {
+                const double percent = highlightRatio * 100.0;
+                hints << tr("Overexposed: ~%1% of pixels near white").arg(locale.toString(percent, 'f', percent >= 10.0 ? 0 : 1));
+            }
+            if (shadowRatio > 0.05) {
+                const double percent = shadowRatio * 100.0;
+                hints << tr("Underexposed: ~%1% of pixels near black").arg(locale.toString(percent, 'f', percent >= 10.0 ? 0 : 1));
+            }
+        }
+
+        if (hints.isEmpty()) {
+            ui->developHistogramHintLabel->setText(tr("Exposure looks balanced."));
+        } else {
+            ui->developHistogramHintLabel->setText(hints.join(QLatin1Char('\n')));
+        }
     }
 }
 
@@ -563,7 +644,7 @@ void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPa
     }
 }
 
-void MainWindow::populateDevelopMetadata(const QImage &image, const QString &filePath)
+void MainWindow::populateDevelopMetadata(const QImage &image, const QString &filePath, const DevelopMetadata &metadata)
 {
     QFileInfo info(filePath);
     const QLocale locale;
@@ -576,26 +657,35 @@ void MainWindow::populateDevelopMetadata(const QImage &image, const QString &fil
                                                .arg(locale.formattedDataSize(info.size())));
     }
 
-    if (ui->developMetadataFileNameValue) {
-        ui->developMetadataFileNameValue->setText(info.fileName());
+    auto setLabelText = [](QLabel *label, const QString &value) {
+        if (label) {
+            label->setText(value.isEmpty() ? QStringLiteral("—") : value);
+        }
+    };
+
+    QString cameraDisplay;
+    if (!metadata.cameraMake.isEmpty()) {
+        cameraDisplay = metadata.cameraMake.trimmed();
     }
+    if (!metadata.cameraModel.isEmpty()) {
+        cameraDisplay = cameraDisplay.isEmpty()
+                ? metadata.cameraModel.trimmed()
+                : QStringLiteral("%1 %2").arg(cameraDisplay, metadata.cameraModel.trimmed());
+    }
+    setLabelText(ui->developMetadataCameraValue, cameraDisplay);
+    setLabelText(ui->developMetadataLensValue, metadata.lens);
+    setLabelText(ui->developMetadataIsoValue, metadata.iso);
+    setLabelText(ui->developMetadataShutterValue, metadata.shutterSpeed);
+    setLabelText(ui->developMetadataApertureValue, metadata.aperture);
+    setLabelText(ui->developMetadataFocalLengthValue, metadata.focalLength);
+    setLabelText(ui->developMetadataFlashValue, metadata.flash);
+    setLabelText(ui->developMetadataFocusDistanceValue, metadata.focusDistance);
+
     if (ui->developMetadataFileSizeValue) {
         ui->developMetadataFileSizeValue->setText(locale.formattedDataSize(info.size()));
     }
     if (ui->developMetadataResolutionValue) {
         ui->developMetadataResolutionValue->setText(tr("%1 x %2").arg(image.width()).arg(image.height()));
-    }
-    if (ui->developMetadataColorProfileValue) {
-        QString profileText = tr("Unknown");
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        if (image.colorSpace().isValid()) {
-            profileText = image.colorSpace().description();
-        }
-#endif
-        ui->developMetadataColorProfileValue->setText(profileText);
-    }
-    if (ui->developMetadataBitDepthValue) {
-        ui->developMetadataBitDepthValue->setText(tr("%1-bit").arg(image.depth()));
     }
     if (ui->developMetadataCaptureDateValue) {
         const QDateTime captured = info.birthTime().isValid() ? info.birthTime() : info.lastModified();
@@ -627,6 +717,7 @@ void MainWindow::fitDevelopViewToImage()
         return;
     }
 
+    m_developFitMode = true;
     ui->developImageView->fitInView(m_developPixmapItem, Qt::KeepAspectRatio);
     m_developZoom = ui->developImageView->transform().m11();
 
@@ -659,6 +750,7 @@ void MainWindow::applyDevelopZoomPreset(const QString &preset)
         return;
     }
 
+    m_developFitMode = false;
     m_developZoom = percentage / 100.0;
 
     QTransform transform;
@@ -783,7 +875,7 @@ void MainWindow::handleDevelopImageLoaded()
 
     fitDevelopViewToImage();
 
-    populateDevelopMetadata(result.image, result.filePath);
+    populateDevelopMetadata(result.image, result.filePath, result.metadata);
     updateHistogram(result.histogram);
 
     m_currentDevelopAssetId = result.assetId;
@@ -817,6 +909,23 @@ MainWindow::~MainWindow()
 {
     clearLibrary();
     delete ui;
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+
+    if (!m_developFitMode) {
+        return;
+    }
+    if (!ui->developImageView || !m_developPixmapItem) {
+        return;
+    }
+    if (m_developPixmapItem->pixmap().isNull()) {
+        return;
+    }
+
+    fitDevelopViewToImage();
 }
 
 // Menubar

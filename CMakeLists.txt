@@ -34,7 +34,7 @@ set(PROJECT_SOURCES
     previewgenerator.h
     histogramwidget.cpp
     histogramwidget.h
-    histogramtypes.h
+    developtypes.h
 )
 
 # Create the executable using the list of sources.

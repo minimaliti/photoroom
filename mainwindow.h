@@ -12,7 +12,7 @@
 #include <QString>
 #include <QVector>
 
-#include "histogramtypes.h"
+#include "developtypes.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -30,6 +30,7 @@ struct DevelopImageLoadResult
     QString filePath;
     QImage image;
     HistogramData histogram;
+    DevelopMetadata metadata;
     QString errorMessage;
 };
 
@@ -70,6 +71,7 @@ private:
     QVector<LibraryAsset> m_assets;
     qint64 m_currentDevelopAssetId = -1;
     double m_developZoom = 1.0;
+    bool m_developFitMode = true;
     int m_pendingDevelopRequestId = 0;
     QString m_pendingDevelopFilePath;
     QFutureWatcher<DevelopImageLoadResult> *m_imageLoadWatcher = nullptr;
@@ -85,7 +87,7 @@ private:
     QString assetOriginalPath(const LibraryAsset &asset) const;
     void showStatusMessage(const QString &message, int timeoutMs = 3000);
     void updateDevelopFilmstrip();
-    void populateDevelopMetadata(const QImage &image, const QString &filePath);
+    void populateDevelopMetadata(const QImage &image, const QString &filePath, const DevelopMetadata &metadata);
     const LibraryAsset *assetById(qint64 assetId) const;
     void applyDevelopZoomPreset(const QString &preset);
     void fitDevelopViewToImage();
@@ -96,6 +98,9 @@ private:
     void selectFilmstripItem(qint64 assetId);
 
     LibraryManager *m_libraryManager = nullptr;
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 };
 
 #endif // MAINWINDOW_H
