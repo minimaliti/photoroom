@@ -149,13 +149,9 @@ void LibraryGridView::paintEvent(QPaintEvent *event)
                 painter.drawText(imageRect, Qt::AlignCenter | Qt::TextWordWrap, tr("Preview pending"));
             }
 
-            QString overlayText = item.photoNumber.trimmed();
-            bool overlayIsNumeric = false;
-            int overlayNumber = overlayText.toInt(&overlayIsNumeric);
-            if (overlayIsNumeric) {
-                overlayText = QStringLiteral("#%1").arg(overlayNumber, 4, 10, QChar('0'));
-            } else if (!overlayText.isEmpty()) {
-                overlayText.prepend('#');
+            QString overlayText;
+            if (!item.photoNumber.trimmed().isEmpty()) {
+                overlayText = item.photoNumber.trimmed();
             } else if (!item.fileName.isEmpty()) {
                 overlayText = item.fileName;
             } else {
