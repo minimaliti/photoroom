@@ -1,24 +1,19 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include "imagelabel.h"
-#include "imageprocessor.h"
-#include "imageadjustments.h"
-#include <QMainWindow>
-#include <QPixmap>
-#include <qstackedwidget.h>
-#include <QGridLayout>
-#include <QFileInfoList>
-#include <QFuture>
-#include <QFutureWatcher>
-#include <QMouseEvent>
 #include "librarymanager.h"
+
+#include <QList>
+#include <QMainWindow>
+#include <QVector>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
 }
 QT_END_NAMESPACE
+
+class LibraryGridView;
 
 class MainWindow : public QMainWindow
 {
@@ -28,9 +23,7 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    static QPixmap loadPixmapFromFile(const QString &filePath, bool isThumbnail, LibraryManager *libraryManager);
-
-public slots:
+private slots:
     void on_actionExit_triggered();
     void on_actionNew_Library_triggered();
     void on_actionOpen_Library_triggered();
@@ -45,89 +38,25 @@ public slots:
     void on_actionInverse_Selection_triggered();
     void on_actionPreferences_triggered();
     void on_actionImport_triggered();
-    void on_actionRefresh_triggered();
-    void on_actionSettings_triggered();
-    void on_actionBackup_triggered();
-
-    void onThumbnailClicked(QMouseEvent *event);
-    void onThumbnailDoubleClicked();
-    void onThumbnailReady(const QString &filePath, const QPixmap &pixmap);
-    void onFullImageReady(const QString &filePath, const QPixmap &pixmap);
-    void applyAdjustments();
-
-    void showLibraryPage();
-    void showDevelopPage();
-    void onResizeTimerTimeout();
-
-signals:
-    void thumbnailLoaded(const QString &filePath, const QPixmap &pixmap);
-    void fullImageLoaded(const QString &filePath, const QPixmap &pixmap);
-
-protected:
-    bool eventFilter(QObject *obj, QEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
+    void openAssetInDevelop(qint64 assetId, const QString &filePath);
+    void handleSelectionChanged(const QList<qint64> &selection);
 
 private:
     Ui::MainWindow *ui;
-    QStackedWidget *stackedWidget;
-    QWidget *libraryPage;
-    QWidget *developPage;
+    LibraryGridView *m_libraryGridView = nullptr;
 
-    QFileInfoList imageFiles;
     QString currentLibraryPath;
+    QVector<LibraryAsset> m_assets;
 
-    QList<ImageLabel*> thumbnailWidgets;
-    QList<ImageLabel*> m_imageStripThumbnails;
-    QTimer *resizeTimer;
-
-    ImageLabel* m_lastSelected = nullptr;
-
-    QPixmap m_currentPixmap;
-    QPixmap m_originalPixmap;
-    QString m_currentDevelopImagePath;
-    ImageProcessor* m_imageProcessor;
-    ImageAdjustments m_adjustments;
-    QTimer* m_adjustmentTimer;
-
-    // For asynchronous loading
-    QFutureWatcher<void> m_imageLoadingWatcher;
-
-private slots:
-    void delayedApplyAdjustments();
-    void onThreadCountSliderChanged(int value);
-    void onProcessingFinished(const QPixmap &pixmap);
-
-    void populateLibrary(const QString &folderPath);
-    void updateImageGrid();
-    void updateImageStrip();
     void clearLibrary();
+    void bindLibrarySignals();
+    void refreshLibraryView();
+    void updateThumbnailPreview(qint64 assetId, const QString &previewPath);
+    QString assetPreviewPath(const LibraryAsset &asset) const;
+    QString assetOriginalPath(const LibraryAsset &asset) const;
+    void showStatusMessage(const QString &message, int timeoutMs = 3000);
 
-    void updateDevelopImage();
-    void onImageStripThumbnailClicked();
-
-private slots:
-    void onLibraryError(const QString &message);
-
-private:
-    LibraryManager *m_libraryManager;
-
-    QStringList findImageFilesInDirectory(const QString &folderPath);
-
-    // Sidecar file handling
-    void saveSidecarFile(const QString &imagePath, const ImageAdjustments &adjustments);
-    ImageAdjustments loadSidecarFile(const QString &imagePath);
-    void updateAdjustmentSliders();
-    void setAdjustmentSlidersEnabled(bool enabled);
-    void saveAdjustedThumbnailToCache(const QString &filePath, const QPixmap &adjustedPixmap);
-
-    QSettings* m_settings;
-    QList<QString> m_recentLibraries;
-
-    void loadRecentLibraries();
-    void saveRecentLibraries();
-    void updateRecentLibrariesMenu();
-    void openRecentLibrary();
-    void addRecentLibrary(const QString &path);
+    LibraryManager *m_libraryManager = nullptr;
 };
 
 #endif // MAINWINDOW_H
