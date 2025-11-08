@@ -6,14 +6,14 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>960</width>
-    <height>540</height>
+    <width>1280</width>
+    <height>800</height>
    </rect>
   </property>
   <property name="minimumSize">
    <size>
-    <width>535</width>
-    <height>377</height>
+    <width>1280</width>
+    <height>800</height>
    </size>
   </property>
   <property name="windowTitle">
@@ -59,25 +59,23 @@
          <number>0</number>
         </property>
         <item row="0" column="0">
-         <widget class="QWidget" name="libraryGridContainer">
-          <layout class="QVBoxLayout" name="libraryGridLayout">
-           <property name="spacing">
-            <number>0</number>
-           </property>
-           <property name="leftMargin">
-            <number>0</number>
-           </property>
-           <property name="topMargin">
-            <number>0</number>
-           </property>
-           <property name="rightMargin">
-            <number>0</number>
-           </property>
-           <property name="bottomMargin">
-            <number>0</number>
-           </property>
-          </layout>
-         </widget>
+         <layout class="QVBoxLayout" name="libraryGridLayout">
+          <property name="spacing">
+           <number>0</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+         </layout>
         </item>
        </layout>
       </widget>
@@ -99,72 +97,70 @@
          <number>8</number>
         </property>
         <item>
-         <widget class="QWidget" name="developHeaderWidget">
-          <layout class="QHBoxLayout" name="developHeaderLayout">
-           <property name="leftMargin">
-            <number>0</number>
-           </property>
-           <property name="topMargin">
-            <number>0</number>
-           </property>
-           <property name="rightMargin">
-            <number>0</number>
-           </property>
-           <property name="bottomMargin">
-            <number>0</number>
-           </property>
-           <property name="spacing">
-            <number>8</number>
-           </property>
-           <item>
-            <widget class="QLabel" name="developImageInfoLabel">
-             <property name="text">
-              <string>No image selected</string>
-             </property>
-             <property name="wordWrap">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <spacer name="developHeaderSpacer">
-             <property name="orientation">
-              <enum>Qt::Orientation::Horizontal</enum>
-             </property>
-             <property name="sizeHint" stdset="0">
-              <size>
-               <width>40</width>
-               <height>20</height>
-              </size>
-             </property>
-            </spacer>
-           </item>
-           <item>
-            <widget class="QPushButton" name="developToggleBeforeAfterButton">
-             <property name="text">
-              <string>Before / After</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QPushButton" name="developResetAdjustmentsButton">
-             <property name="text">
-              <string>Reset</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QComboBox" name="developZoomCombo"/>
-           </item>
-           <item>
-            <widget class="QPushButton" name="developFitButton">
-             <property name="text">
-              <string>Fit</string>
-             </property>
-            </widget>
-           </item>
-          </layout>
-         </widget>
+         <layout class="QHBoxLayout" name="developHeaderLayout">
+          <property name="spacing">
+           <number>8</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="developImageInfoLabel">
+            <property name="text">
+             <string>No image selected</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <spacer name="developHeaderSpacer">
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>40</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+          <item>
+           <widget class="QPushButton" name="developToggleBeforeAfterButton">
+            <property name="text">
+             <string>Before / After</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="developResetAdjustmentsButton">
+            <property name="text">
+             <string>Reset</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="developZoomCombo"/>
+          </item>
+          <item>
+           <widget class="QPushButton" name="developFitButton">
+            <property name="text">
+             <string>Fit</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </item>
         <item>
          <widget class="QSplitter" name="developVerticalSplitter">
@@ -183,6 +179,9 @@
              </size>
             </property>
             <layout class="QVBoxLayout" name="developInfoLayout">
+             <property name="spacing">
+              <number>8</number>
+             </property>
              <property name="leftMargin">
               <number>0</number>
              </property>
@@ -195,9 +194,6 @@
              <property name="bottomMargin">
               <number>0</number>
              </property>
-             <property name="spacing">
-              <number>8</number>
-             </property>
              <item>
               <widget class="QGroupBox" name="developHistogramGroup">
                <property name="title">
@@ -209,14 +205,11 @@
                 </property>
                 <item>
                  <widget class="QLabel" name="developHistogramPlaceholderLabel">
-                  <property name="minimumHeight">
-                   <number>160</number>
+                  <property name="text">
+                   <string>Histogram preview not available</string>
                   </property>
                   <property name="alignment">
                    <set>Qt::AlignmentFlag::AlignCenter</set>
-                  </property>
-                  <property name="text">
-                   <string>Histogram preview not available</string>
                   </property>
                   <property name="wordWrap">
                    <bool>true</bool>
@@ -226,7 +219,7 @@
                 <item>
                  <widget class="QLabel" name="developHistogramHintLabel">
                   <property name="text">
-                   <string>Histogram will appear when an image is loaded.</string>
+                   <string> </string>
                   </property>
                   <property name="wordWrap">
                    <bool>true</bool>
@@ -236,169 +229,169 @@
                </layout>
               </widget>
              </item>
-            <item>
-             <widget class="QGroupBox" name="developMetadataGroup">
-              <property name="title">
-               <string>Metadata</string>
-              </property>
-              <layout class="QFormLayout" name="developMetadataLayout">
-               <item row="0" column="0">
-                <widget class="QLabel" name="developMetadataCameraLabel">
-                 <property name="text">
-                  <string>Camera</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="0" column="1">
-                <widget class="QLabel" name="developMetadataCameraValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="1" column="0">
-                <widget class="QLabel" name="developMetadataLensLabel">
-                 <property name="text">
-                  <string>Lens</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="1" column="1">
-                <widget class="QLabel" name="developMetadataLensValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="2" column="0">
-                <widget class="QLabel" name="developMetadataIsoLabel">
-                 <property name="text">
-                  <string>ISO</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="2" column="1">
-                <widget class="QLabel" name="developMetadataIsoValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="3" column="0">
-                <widget class="QLabel" name="developMetadataShutterLabel">
-                 <property name="text">
-                  <string>Shutter</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="3" column="1">
-                <widget class="QLabel" name="developMetadataShutterValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="4" column="0">
-                <widget class="QLabel" name="developMetadataApertureLabel">
-                 <property name="text">
-                  <string>Aperture</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="4" column="1">
-                <widget class="QLabel" name="developMetadataApertureValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="5" column="0">
-                <widget class="QLabel" name="developMetadataFocalLengthLabel">
-                 <property name="text">
-                  <string>Focal Length</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="5" column="1">
-                <widget class="QLabel" name="developMetadataFocalLengthValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="6" column="0">
-                <widget class="QLabel" name="developMetadataFlashLabel">
-                 <property name="text">
-                  <string>Flash</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="6" column="1">
-                <widget class="QLabel" name="developMetadataFlashValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="7" column="0">
-                <widget class="QLabel" name="developMetadataFocusDistanceLabel">
-                 <property name="text">
-                  <string>Focus Distance</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="7" column="1">
-                <widget class="QLabel" name="developMetadataFocusDistanceValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="8" column="0">
-                <widget class="QLabel" name="developMetadataFileSizeLabel">
-                 <property name="text">
-                  <string>Size</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="8" column="1">
-                <widget class="QLabel" name="developMetadataFileSizeValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="9" column="0">
-                <widget class="QLabel" name="developMetadataResolutionLabel">
-                 <property name="text">
-                  <string>Resolution</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="9" column="1">
-                <widget class="QLabel" name="developMetadataResolutionValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="10" column="0">
-                <widget class="QLabel" name="developMetadataCaptureDateLabel">
-                 <property name="text">
-                  <string>Captured</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="10" column="1">
-                <widget class="QLabel" name="developMetadataCaptureDateValue">
-                 <property name="text">
-                  <string>—</string>
-                 </property>
-                </widget>
-               </item>
-              </layout>
-             </widget>
-            </item>
+             <item>
+              <widget class="QGroupBox" name="developMetadataGroup">
+               <property name="title">
+                <string>Metadata</string>
+               </property>
+               <layout class="QFormLayout" name="developMetadataLayout">
+                <item row="0" column="0">
+                 <widget class="QLabel" name="developMetadataCameraLabel">
+                  <property name="text">
+                   <string>Camera</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="0" column="1">
+                 <widget class="QLabel" name="developMetadataCameraValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="1" column="0">
+                 <widget class="QLabel" name="developMetadataLensLabel">
+                  <property name="text">
+                   <string>Lens</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="1" column="1">
+                 <widget class="QLabel" name="developMetadataLensValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="2" column="0">
+                 <widget class="QLabel" name="developMetadataIsoLabel">
+                  <property name="text">
+                   <string>ISO</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="2" column="1">
+                 <widget class="QLabel" name="developMetadataIsoValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="3" column="0">
+                 <widget class="QLabel" name="developMetadataShutterLabel">
+                  <property name="text">
+                   <string>Shutter</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="3" column="1">
+                 <widget class="QLabel" name="developMetadataShutterValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="4" column="0">
+                 <widget class="QLabel" name="developMetadataApertureLabel">
+                  <property name="text">
+                   <string>Aperture</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="4" column="1">
+                 <widget class="QLabel" name="developMetadataApertureValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="5" column="0">
+                 <widget class="QLabel" name="developMetadataFocalLengthLabel">
+                  <property name="text">
+                   <string>Focal Length</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="5" column="1">
+                 <widget class="QLabel" name="developMetadataFocalLengthValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="6" column="0">
+                 <widget class="QLabel" name="developMetadataFlashLabel">
+                  <property name="text">
+                   <string>Flash</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="6" column="1">
+                 <widget class="QLabel" name="developMetadataFlashValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="7" column="0">
+                 <widget class="QLabel" name="developMetadataFocusDistanceLabel">
+                  <property name="text">
+                   <string>Focus Distance</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="7" column="1">
+                 <widget class="QLabel" name="developMetadataFocusDistanceValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="8" column="0">
+                 <widget class="QLabel" name="developMetadataFileSizeLabel">
+                  <property name="text">
+                   <string>Size</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="8" column="1">
+                 <widget class="QLabel" name="developMetadataFileSizeValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="9" column="0">
+                 <widget class="QLabel" name="developMetadataResolutionLabel">
+                  <property name="text">
+                   <string>Resolution</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="9" column="1">
+                 <widget class="QLabel" name="developMetadataResolutionValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="10" column="0">
+                 <widget class="QLabel" name="developMetadataCaptureDateLabel">
+                  <property name="text">
+                   <string>Captured</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="10" column="1">
+                 <widget class="QLabel" name="developMetadataCaptureDateValue">
+                  <property name="text">
+                   <string>—</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
              <item>
               <spacer name="developInfoSpacer">
                <property name="orientation">
@@ -470,7 +463,7 @@
                  </sizepolicy>
                 </property>
                 <property name="frameShape">
-                 <enum>QFrame::NoFrame</enum>
+                 <enum>QFrame::Shape::NoFrame</enum>
                 </property>
                </widget>
               </item>
@@ -495,11 +488,14 @@
               <rect>
                <x>0</x>
                <y>0</y>
-               <width>278</width>
-               <height>500</height>
+               <width>424</width>
+               <height>859</height>
               </rect>
              </property>
              <layout class="QVBoxLayout" name="developControlsLayout">
+              <property name="spacing">
+               <number>12</number>
+              </property>
               <property name="leftMargin">
                <number>12</number>
               </property>
@@ -510,9 +506,6 @@
                <number>12</number>
               </property>
               <property name="bottomMargin">
-               <number>12</number>
-              </property>
-              <property name="spacing">
                <number>12</number>
               </property>
               <item>
@@ -1096,13 +1089,10 @@
              <verstretch>0</verstretch>
             </sizepolicy>
            </property>
-           <property name="minimumHeight">
-            <number>180</number>
-           </property>
-           <property name="maximumHeight">
-            <number>220</number>
-           </property>
            <layout class="QVBoxLayout" name="developFilmstripLayout">
+            <property name="spacing">
+             <number>4</number>
+            </property>
             <property name="leftMargin">
              <number>0</number>
             </property>
@@ -1115,76 +1105,83 @@
             <property name="bottomMargin">
              <number>0</number>
             </property>
-            <property name="spacing">
-             <number>4</number>
-            </property>
             <item>
-             <widget class="QWidget" name="developFilmstripHeader">
-              <layout class="QHBoxLayout" name="developFilmstripHeaderLayout">
-               <property name="leftMargin">
-                <number>0</number>
-               </property>
-               <property name="topMargin">
-                <number>0</number>
-               </property>
-               <property name="rightMargin">
-                <number>0</number>
-               </property>
-               <property name="bottomMargin">
-                <number>0</number>
-               </property>
-               <property name="spacing">
-                <number>8</number>
-               </property>
-               <item>
-                <widget class="QLabel" name="developFilmstripLabel">
+             <layout class="QHBoxLayout" name="developFilmstripHeaderLayout">
+              <property name="spacing">
+               <number>8</number>
+              </property>
+              <property name="leftMargin">
+               <number>0</number>
+              </property>
+              <property name="topMargin">
+               <number>0</number>
+              </property>
+              <property name="rightMargin">
+               <number>0</number>
+              </property>
+              <property name="bottomMargin">
+               <number>0</number>
+              </property>
+              <item>
+               <widget class="QLabel" name="developFilmstripLabel">
+                <property name="text">
+                 <string>Filmstrip</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <spacer name="developFilmstripHeaderSpacer">
+                <property name="orientation">
+                 <enum>Qt::Orientation::Horizontal</enum>
+                </property>
+                <property name="sizeHint" stdset="0">
+                 <size>
+                  <width>40</width>
+                  <height>20</height>
+                 </size>
+                </property>
+               </spacer>
+              </item>
+              <item>
+               <widget class="QComboBox" name="developFilmstripFilterCombo">
+                <item>
                  <property name="text">
-                  <string>Filmstrip</string>
+                  <string>All Photos</string>
                  </property>
-                </widget>
-               </item>
-               <item>
-                <spacer name="developFilmstripHeaderSpacer">
-                 <property name="orientation">
-                  <enum>Qt::Orientation::Horizontal</enum>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>Flagged</string>
                  </property>
-                 <property name="sizeHint" stdset="0">
-                  <size>
-                   <width>40</width>
-                   <height>20</height>
-                  </size>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>Rejected</string>
                  </property>
-                </spacer>
-               </item>
-               <item>
-                <widget class="QComboBox" name="developFilmstripFilterCombo">
-                 <item>
-                  <property name="text">
-                   <string>All Photos</string>
-                  </property>
-                 </item>
-                 <item>
-                  <property name="text">
-                   <string>Flagged</string>
-                  </property>
-                 </item>
-                 <item>
-                  <property name="text">
-                   <string>Rejected</string>
-                  </property>
-                 </item>
-                </widget>
-               </item>
-              </layout>
-             </widget>
+                </item>
+               </widget>
+              </item>
+             </layout>
             </item>
             <item>
              <widget class="QListWidget" name="developFilmstripList">
-              <property name="minimumHeight">
-               <number>120</number>
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
               </property>
-              <property name="maximumHeight">
-               <number>140</number>
+              <property name="minimumSize">
+               <size>
+                <width>0</width>
+                <height>130</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>16777215</width>
+                <height>130</height>
+               </size>
               </property>
               <property name="selectionMode">
                <enum>QAbstractItemView::SelectionMode::SingleSelection</enum>
@@ -1206,7 +1203,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>960</width>
+     <width>1280</width>
      <height>21</height>
     </rect>
    </property>

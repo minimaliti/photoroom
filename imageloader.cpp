@@ -1,559 +1,444 @@
 #include "imageloader.h"
 
+#include <QColor>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
-#include <QSet>
 #include <QLocale>
 #include <QObject>
+#include <QPainter>
 #include <QRegularExpression>
+#include <QSet>
+#include <QLinearGradient>
 #include <QStringList>
 #include <cmath>
 #include <cstring>
-
+#include <QElapsedTimer>
+#include <QDebug>
 #include <libraw/libraw.h>
 
 namespace {
 
-QString formatIso(double iso)
-{
-    if (iso <= 0.0) {
-        return {};
-    }
-    return QObject::tr("ISO %1").arg(QLocale().toString(std::round(iso)));
+// --- Utility Lambdas for Reuse ---
+auto localeStr = [](double val, int prec = 0) { return QLocale().toString(val, 'f', prec); };
+
+QString formatIso(double iso) {
+    return (iso > 0.0) ? QObject::tr("ISO %1").arg(localeStr(std::round(iso))) : QString();
 }
 
 QString formatExposureTime(double seconds)
 {
-    if (seconds <= 0.0) {
-        return {};
-    }
-
-    const QLocale locale;
-    if (seconds >= 1.0) {
-        const int precision = seconds >= 10.0 ? 0 : 1;
-        return QObject::tr("%1 s").arg(locale.toString(seconds, 'f', precision));
-    }
-
-    double denominator = std::round(1.0 / seconds);
-    if (denominator < 1.0) {
-        denominator = 1.0;
-    }
-
-    const double approximated = 1.0 / denominator;
-    if (std::abs(approximated - seconds) > 0.005) {
+    if (seconds <= 0.0)
+        return QString();
+    QLocale locale;
+    if (seconds >= 1.0)
+        return QObject::tr("%1 s").arg(locale.toString(seconds, 'f', (seconds >= 10.0 ? 0 : 1)));
+    double denominator = 1.0 / seconds;
+    denominator = denominator < 1.0 ? 1.0 : std::round(denominator);
+    double approx = 1.0 / denominator;
+    if (std::abs(approx - seconds) > 0.005)
         return QObject::tr("%1 s").arg(locale.toString(seconds, 'f', 3));
-    }
-
     return QObject::tr("1/%1 s").arg(locale.toString(denominator, 'f', 0));
 }
 
-QString formatAperture(double aperture)
-{
-    if (aperture <= 0.0) {
-        return {};
-    }
-    const int precision = aperture < 10.0 ? 1 : 0;
-    return QObject::tr("f/%1").arg(QLocale().toString(aperture, 'f', precision));
+QString formatAperture(double aperture) {
+    if (aperture <= 0.0) return {};
+    return QObject::tr("f/%1").arg(localeStr(aperture, aperture < 10.0 ? 1 : 0));
 }
 
-QString formatFocalLength(double focalLengthMm)
-{
-    if (focalLengthMm <= 0.0) {
-        return {};
-    }
-    const int precision = focalLengthMm < 10.0 ? 1 : 0;
-    return QObject::tr("%1 mm").arg(QLocale().toString(focalLengthMm, 'f', precision));
+QString formatFocalLength(double focalLengthMm) {
+    if (focalLengthMm <= 0.0) return {};
+    return QObject::tr("%1 mm").arg(localeStr(focalLengthMm, focalLengthMm < 10.0 ? 1 : 0));
 }
 
-QString formatFocusDistance(double meters)
-{
-    if (meters <= 0.0) {
-        return {};
-    }
-
-    if (meters > 1e6) {
-        return QObject::tr("∞");
-    }
-
-    const QLocale locale;
-    if (meters >= 1.0) {
-        const int precision = meters >= 10.0 ? 0 : 1;
-        return QObject::tr("%1 m").arg(locale.toString(meters, 'f', precision));
-    }
-
-    return QObject::tr("%1 cm").arg(locale.toString(meters * 100.0, 'f', 0));
+QString formatFocusDistance(double meters) {
+    if (meters <= 0.0) return {};
+    if (meters > 1e6) return QObject::tr("∞");
+    if (meters >= 1.0)
+        return QObject::tr("%1 m").arg(localeStr(meters, meters >= 10.0 ? 0 : 1));
+    return QObject::tr("%1 cm").arg(localeStr(meters * 100.0, 0));
 }
 
-double parseRationalString(const QString &value, bool *ok = nullptr)
-{
-    if (ok) {
-        *ok = false;
-    }
-    if (value.isEmpty()) {
-        return 0.0;
-    }
-
-    const QString normalized = value.trimmed();
-    if (normalized.contains('/')) {
-        const QStringList parts = normalized.split('/');
+double parseRationalString(const QString &v, bool *ok = nullptr) {
+    if (ok) *ok = false;
+    QString value = v.trimmed();
+    if (value.isEmpty()) return 0.0;
+    if (value.contains('/')) {
+        auto parts = value.split('/');
         if (parts.size() == 2) {
-            bool okNum = false;
-            bool okDen = false;
-            const double numerator = parts.at(0).toDouble(&okNum);
-            const double denominator = parts.at(1).toDouble(&okDen);
-            if (okNum && okDen && denominator != 0.0) {
-                if (ok) {
-                    *ok = true;
-                }
-                return numerator / denominator;
-            }
+            bool ok1 = false, ok2 = false;
+            double num = parts[0].toDouble(&ok1), den = parts[1].toDouble(&ok2);
+            if (ok1 && ok2 && den != 0.0) { if (ok) *ok = true; return num / den; }
         }
     } else {
         bool okValue = false;
-        const double numeric = normalized.toDouble(&okValue);
-        if (okValue) {
-            if (ok) {
-                *ok = true;
-            }
-            return numeric;
-        }
+        double numeric = value.toDouble(&okValue);
+        if (okValue) { if (ok) *ok = true; return numeric; }
     }
-
     return 0.0;
 }
 
-QString describeFlash(int flashValue, bool *fired = nullptr)
-{
-    const bool flashFired = (flashValue & 0x1) != 0;
-    if (fired) {
-        *fired = flashFired;
-    }
-    return flashFired ? QObject::tr("Flash fired") : QObject::tr("Flash off");
+QString describeFlash(int flashValue, bool *fired = nullptr) {
+    bool flashFired = (flashValue & 0x1) != 0;
+    if (fired) *fired = flashFired;
+    return QObject::tr(flashFired ? "Flash fired" : "Flash off");
 }
 
-QString formatFocalRange(double minFocalMm, double maxFocalMm)
-{
+QString formatFocalRange(double minF, double maxF) {
     const QLocale locale;
-    if (minFocalMm <= 0.0 && maxFocalMm <= 0.0) {
-        return {};
+    if (minF <= 0.0 && maxF <= 0.0) return {};
+    if (minF <= 0.0) return QObject::tr("%1 mm").arg(localeStr(maxF, maxF < 10.0 ? 1 : 0));
+    if (maxF <= 0.0) return QObject::tr("%1 mm").arg(localeStr(minF, minF < 10.0 ? 1 : 0));
+    if (std::abs(minF - maxF) < 0.1) {
+        double average = (minF + maxF) / 2.0;
+        return QObject::tr("%1 mm").arg(localeStr(average, average < 10.0 ? 1 : 0));
     }
-    if (minFocalMm <= 0.0) {
-        return QObject::tr("%1 mm").arg(locale.toString(maxFocalMm, 'f', maxFocalMm < 10.0 ? 1 : 0));
-    }
-    if (maxFocalMm <= 0.0) {
-        return QObject::tr("%1 mm").arg(locale.toString(minFocalMm, 'f', minFocalMm < 10.0 ? 1 : 0));
-    }
-    if (std::abs(minFocalMm - maxFocalMm) < 0.1) {
-        const double average = (minFocalMm + maxFocalMm) / 2.0;
-        return QObject::tr("%1 mm").arg(locale.toString(average, 'f', average < 10.0 ? 1 : 0));
-    }
-
-    const int precisionMin = minFocalMm < 10.0 ? 1 : 0;
-    const int precisionMax = maxFocalMm < 10.0 ? 1 : 0;
+    int pMin = minF < 10.0 ? 1 : 0, pMax = maxF < 10.0 ? 1 : 0;
     return QObject::tr("%1-%2 mm")
-        .arg(locale.toString(minFocalMm, 'f', precisionMin),
-             locale.toString(maxFocalMm, 'f', precisionMax));
+        .arg(localeStr(minF, pMin), localeStr(maxF, pMax));
 }
 
 } // namespace
 
 namespace ImageLoader {
 
-const QSet<QString>& rawFileExtensions()
-{
-    static const QSet<QString> kExtensions = {
-        QStringLiteral("arw"), QStringLiteral("cr2"), QStringLiteral("cr3"), QStringLiteral("crw"),
-        QStringLiteral("dng"), QStringLiteral("erf"), QStringLiteral("kdc"), QStringLiteral("mrw"),
-        QStringLiteral("nef"), QStringLiteral("nrw"), QStringLiteral("orf"), QStringLiteral("pef"),
-        QStringLiteral("raf"), QStringLiteral("raw"), QStringLiteral("rw2"), QStringLiteral("rwz"),
-        QStringLiteral("sr2"), QStringLiteral("srw"), QStringLiteral("x3f")
+const QSet<QString>& rawFileExtensions() {
+    static const QSet<QString> exts = {
+        "arw","cr2","cr3","crw","dng","erf","kdc","mrw","nef","nrw","orf","pef",
+        "raf","raw","rw2","rwz","sr2","srw","x3f"
     };
-    return kExtensions;
+    return exts;
 }
 
-QStringList supportedNameFilters()
-{
-    QStringList filters = {
-        QStringLiteral("*.png"),
-        QStringLiteral("*.jpg"),
-        QStringLiteral("*.jpeg"),
-        QStringLiteral("*.bmp"),
-        QStringLiteral("*.tif"),
-        QStringLiteral("*.tiff")
-    };
-
-    for (const QString &ext : rawFileExtensions()) {
-        filters << "*." + ext;
-    }
-
+QStringList supportedNameFilters() {
+    QStringList filters = { "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff" };
+    for (const QString &ext : rawFileExtensions()) filters << "*." + ext;
     return filters;
 }
 
-bool isRawFile(const QString &filePath)
-{
-    const QString suffix = QFileInfo(filePath).suffix().toLower();
-    return rawFileExtensions().contains(suffix);
+bool isRawFile(const QString &filePath) {
+    return rawFileExtensions().contains(QFileInfo(filePath).suffix().toLower());
 }
 
-QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage)
-{
+QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage) {
     if (!isRawFile(filePath)) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("File is not a RAW file.");
-        }
+        if (errorMessage) *errorMessage = QStringLiteral("File is not a RAW file.");
         return {};
     }
-
     LibRaw rawProcessor;
-    const QByteArray encodedPath = QFile::encodeName(filePath);
-
-    int ret = rawProcessor.open_file(encodedPath.constData());
+    int ret = rawProcessor.open_file(QFile::encodeName(filePath).constData());
     if (ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        if (errorMessage) *errorMessage = QStringLiteral("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
         return {};
     }
-
     ret = rawProcessor.unpack_thumb();
     if (ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw unpack_thumb failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        if (errorMessage) *errorMessage = QStringLiteral("LibRaw unpack_thumb failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
         rawProcessor.recycle();
         return {};
     }
-
     libraw_processed_image_t *thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
     if (!thumb || ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw dcraw_make_mem_thumb failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        if (errorMessage) *errorMessage = QStringLiteral("LibRaw dcraw_make_mem_thumb failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
         rawProcessor.recycle();
         return {};
     }
-
     QByteArray result(reinterpret_cast<const char*>(thumb->data), static_cast<int>(thumb->data_size));
     LibRaw::dcraw_clear_mem(thumb);
     rawProcessor.recycle();
-
-    if (result.isEmpty() && errorMessage && errorMessage->isEmpty()) {
+    if (result.isEmpty() && errorMessage && errorMessage->isEmpty())
         *errorMessage = QStringLiteral("Embedded preview extraction returned empty data.");
-    }
-
     return result;
+}
+
+static QImage loadEmbeddedRawPreviewImage(const QString &filePath, QString *errorMessage) {
+    QString previewError;
+    QByteArray data = loadEmbeddedRawPreview(filePath, &previewError);
+    if (!data.isEmpty()) {
+        QImage image;
+        if (image.loadFromData(data)) return image;
+        if (errorMessage && errorMessage->isEmpty()) *errorMessage = QObject::tr("Failed to decode embedded RAW preview.");
+    }
+    if (errorMessage && !previewError.isEmpty()) {
+        if (!errorMessage->isEmpty()) *errorMessage += QLatin1Char('\n');
+        *errorMessage += previewError;
+    }
+    return {};
+}
+
+static QImage buildPlaceholderPreview(const QString &reason) {
+    const QSize size(480, 480);
+    QImage image(size, QImage::Format_RGB32);
+    QLinearGradient gradient(0, 0, 0, size.height());
+    gradient.setColorAt(0.0, QColor(32, 32, 32));
+    gradient.setColorAt(1.0, QColor(12, 12, 12));
+    QPainter painter(&image);
+    painter.fillRect(image.rect(), gradient);
+    painter.setPen(QColor(220, 220, 220));
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.drawRoundedRect(image.rect().adjusted(6, 6, -6, -6), 12, 12);
+    painter.setPen(QColor(200, 200, 200));
+    painter.drawText(image.rect().adjusted(24, 24, -24, -24), Qt::AlignCenter | Qt::TextWordWrap,
+                     QObject::tr("Preview unavailable\n%1").arg(reason));
+    return image;
+}
+
+static QImage fallbackRawPreview(const QString &filePath, QString *errorMessage, const QString &reason) {
+    if (errorMessage) {
+        if (!errorMessage->isEmpty()) *errorMessage += QLatin1Char('\n');
+        *errorMessage += reason;
+    }
+    QImage embedded = loadEmbeddedRawPreviewImage(filePath, errorMessage);
+    return !embedded.isNull() ? embedded : buildPlaceholderPreview(reason);
 }
 
 QImage loadRawImage(const QString &filePath, QString *errorMessage)
 {
+    QElapsedTimer timer; timer.start();
     LibRaw rawProcessor;
-    const QByteArray encodedPath = QFile::encodeName(filePath);
-
-    int ret = rawProcessor.open_file(encodedPath.constData());
+    int ret = rawProcessor.open_file(QFile::encodeName(filePath).constData());
     if (ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
-        return {};
+        const QString reason = QObject::tr("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
+        qWarning() << reason;
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
     ret = rawProcessor.unpack();
     if (ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw unpack failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        const QString reason = QObject::tr("LibRaw unpack failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
+        qWarning() << reason;
         rawProcessor.recycle();
-        return {};
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
     rawProcessor.imgdata.params.output_bps = 16;
     rawProcessor.imgdata.params.output_color = 1; // sRGB
-
+    rawProcessor.imgdata.params.no_auto_bright = 0;
+    rawProcessor.imgdata.params.use_camera_wb = 1;
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw dcraw_process failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        const QString reason = QObject::tr("LibRaw dcraw_process failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
+        qWarning() << reason;
         rawProcessor.recycle();
-        return {};
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
     libraw_processed_image_t *processed = rawProcessor.dcraw_make_mem_image(&ret);
     if (!processed || ret != LIBRAW_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("LibRaw dcraw_make_mem_image failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-        }
+        const QString reason = QObject::tr("LibRaw dcraw_make_mem_image failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
+        qWarning() << reason;
         rawProcessor.recycle();
-        return {};
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
     QImage result;
-
+    const int width = processed->width, height = processed->height, colors = processed->colors, bits = processed->bits;
+    const size_t stride = static_cast<size_t>(width) * colors;
     if (processed->type == LIBRAW_IMAGE_BITMAP) {
-        const int width = processed->width;
-        const int height = processed->height;
-        const int colors = processed->colors;
-        const int bits = processed->bits;
-        const size_t stride = static_cast<size_t>(width) * colors;
-
         if (colors == 3 || colors == 4) {
-            const bool hasAlpha = colors == 4;
+            bool hasAlpha = colors == 4;
             result = QImage(width, height, hasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888);
-
             if (!result.isNull()) {
                 if (bits == 8) {
                     const unsigned char *src = processed->data;
                     for (int y = 0; y < height; ++y) {
-                        uchar *destLine = result.scanLine(y);
+                        uchar *dest = result.scanLine(y);
                         const unsigned char *srcLine = src + y * stride;
-                        for (int x = 0; x < width; ++x) {
-                            const int srcIndex = x * colors;
-                            const int destIndex = x * colors;
-                            destLine[destIndex + 0] = srcLine[srcIndex + 0];
-                            destLine[destIndex + 1] = srcLine[srcIndex + 1];
-                            destLine[destIndex + 2] = srcLine[srcIndex + 2];
-                            if (hasAlpha) {
-                                destLine[destIndex + 3] = srcLine[srcIndex + 3];
+                        if (hasAlpha)
+                            for (int x = 0; x < width * colors; ++x) dest[x] = srcLine[x];
+                        else
+                            for (int x = 0; x < width; ++x) {
+                                int idx = x * 3;
+                                dest[idx + 0] = srcLine[idx + 0];
+                                dest[idx + 1] = srcLine[idx + 1];
+                                dest[idx + 2] = srcLine[idx + 2];
                             }
-                        }
                     }
                 } else if (bits == 16) {
                     const unsigned short *src = reinterpret_cast<const unsigned short*>(processed->data);
                     for (int y = 0; y < height; ++y) {
-                        uchar *destLine = result.scanLine(y);
+                        uchar *dest = result.scanLine(y);
                         const unsigned short *srcLine = src + y * stride;
-                        for (int x = 0; x < width; ++x) {
-                            const int srcIndex = x * colors;
-                            const int destIndex = x * colors;
-                            destLine[destIndex + 0] = static_cast<uchar>(srcLine[srcIndex + 0] >> 8);
-                            destLine[destIndex + 1] = static_cast<uchar>(srcLine[srcIndex + 1] >> 8);
-                            destLine[destIndex + 2] = static_cast<uchar>(srcLine[srcIndex + 2] >> 8);
-                            if (hasAlpha) {
-                                destLine[destIndex + 3] = static_cast<uchar>(srcLine[srcIndex + 3] >> 8);
-                            }
-                        }
+                        for (int x = 0; x < width; ++x)
+                            for (int c = 0; c < colors; ++c)
+                                dest[x * colors + c] = static_cast<uchar>(srcLine[x * colors + c] >> 8);
                     }
-                } else {
-                    if (errorMessage) {
-                        *errorMessage = QStringLiteral("Unsupported RAW bit depth: %1").arg(bits);
-                    }
-                    result = QImage();
-                }
+                } else goto unsupported_bitmap;
             }
         } else if (colors == 1) {
             result = QImage(width, height, QImage::Format_Grayscale8);
             if (!result.isNull()) {
                 if (bits == 8) {
                     const unsigned char *src = processed->data;
-                    for (int y = 0; y < height; ++y) {
-                        uchar *destLine = result.scanLine(y);
-                        memcpy(destLine, src + y * stride, static_cast<size_t>(width));
-                    }
+                    for (int y = 0; y < height; ++y)
+                        memcpy(result.scanLine(y), src + y * stride, static_cast<size_t>(width));
                 } else if (bits == 16) {
                     const unsigned short *src = reinterpret_cast<const unsigned short*>(processed->data);
                     for (int y = 0; y < height; ++y) {
-                        uchar *destLine = result.scanLine(y);
+                        uchar *dest = result.scanLine(y);
                         const unsigned short *srcLine = src + y * stride;
-                        for (int x = 0; x < width; ++x) {
-                            destLine[x] = static_cast<uchar>(srcLine[x] >> 8);
-                        }
+                        for (int x = 0; x < width; ++x) dest[x] = static_cast<uchar>(srcLine[x] >> 8);
                     }
-                } else {
-                    if (errorMessage) {
-                        *errorMessage = QStringLiteral("Unsupported RAW grayscale bit depth: %1").arg(bits);
-                    }
-                    result = QImage();
-                }
+                } else goto unsupported_bitmap;
             }
         } else {
-            if (errorMessage) {
-                *errorMessage = QStringLiteral("Unsupported RAW color channel count: %1").arg(colors);
+unsupported_bitmap:
+            {
+                QString reason = QObject::tr(colors == 1 ?
+                    "Unsupported RAW grayscale bit depth: %1" :
+                    colors == 3 || colors == 4 ?
+                        "Unsupported RAW bit depth: %1" :
+                        "Unsupported RAW color channel count: %1")
+                    .arg(bits);
+                qWarning() << reason;
+                LibRaw::dcraw_clear_mem(processed);
+                rawProcessor.recycle();
+                qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+                return fallbackRawPreview(filePath, errorMessage, reason);
             }
         }
     } else if (processed->type == LIBRAW_IMAGE_JPEG) {
         QImage temp;
         if (temp.loadFromData(processed->data, processed->data_size, "JPEG")) {
             result = temp.convertToFormat(QImage::Format_RGB888);
-        } else if (errorMessage) {
-            *errorMessage = QStringLiteral("Failed to decode embedded JPEG preview.");
+        } else {
+            QString reason = QObject::tr("Failed to decode embedded JPEG preview.");
+            qWarning() << reason;
+            LibRaw::dcraw_clear_mem(processed);
+            rawProcessor.recycle();
+            qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+            return fallbackRawPreview(filePath, errorMessage, reason);
         }
     } else {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("Unsupported LibRaw processed image type: %1").arg(processed->type);
-        }
+        QString reason = QObject::tr("Unsupported LibRaw processed image type: %1").arg(processed->type);
+        qWarning() << reason;
+        LibRaw::dcraw_clear_mem(processed);
+        rawProcessor.recycle();
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
+    unsigned int warnings = rawProcessor.imgdata.process_warnings;
     LibRaw::dcraw_clear_mem(processed);
     rawProcessor.recycle();
-
-    if (result.isNull() && errorMessage && errorMessage->isEmpty()) {
-        *errorMessage = QStringLiteral("RAW image conversion returned an empty result.");
+    if (warnings != 0) {
+        QString reason = QObject::tr("LibRaw reported warnings (%1) reading %2")
+                                   .arg(warnings)
+                                   .arg(QFileInfo(filePath).fileName());
+        qWarning() << reason;
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
     }
-
+    if (result.isNull()) {
+        QString reason = QObject::tr("RAW image conversion returned an empty result.");
+        qWarning() << reason;
+        qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
+        return fallbackRawPreview(filePath, errorMessage, reason);
+    }
+    qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
     return result;
 }
 
-QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage)
-{
+QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage){
     if (isRawFile(filePath)) {
-        return loadRawImage(filePath, errorMessage);
+        QImage image = loadRawImage(filePath, errorMessage);
+        if (!image.isNull())
+            image = image.scaled(image.width() / 2, image.height() / 2, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        return image;
     }
-
     QImageReader reader(filePath);
     reader.setAutoTransform(true);
     QImage image = reader.read();
-    if (image.isNull() && errorMessage) {
-        *errorMessage = reader.errorString();
-    }
+    if (image.isNull() && errorMessage) *errorMessage = reader.errorString();
     return image;
 }
 
-bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString *errorMessage)
-{
+bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString *errorMessage) {
     if (!metadata) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("Metadata pointer is null.");
-        }
+        if (errorMessage) *errorMessage = QStringLiteral("Metadata pointer is null.");
         return false;
     }
-
     *metadata = DevelopMetadata{};
-
     if (isRawFile(filePath)) {
         LibRaw rawProcessor;
-        const QByteArray encodedPath = QFile::encodeName(filePath);
-
-        int ret = rawProcessor.open_file(encodedPath.constData());
+        int ret = rawProcessor.open_file(QFile::encodeName(filePath).constData());
         if (ret != LIBRAW_SUCCESS) {
-            if (errorMessage) {
-                *errorMessage = QStringLiteral("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-            }
+            if (errorMessage) *errorMessage = QStringLiteral("LibRaw open_file failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
             return false;
         }
-
         ret = rawProcessor.unpack();
         if (ret != LIBRAW_SUCCESS) {
-            if (errorMessage) {
-                *errorMessage = QStringLiteral("LibRaw unpack failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
-            }
+            if (errorMessage) *errorMessage = QStringLiteral("LibRaw unpack failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
             rawProcessor.recycle();
             return false;
         }
-
         metadata->cameraMake = QString::fromLatin1(rawProcessor.imgdata.idata.make).trimmed();
         metadata->cameraModel = QString::fromLatin1(rawProcessor.imgdata.idata.model).trimmed();
-
         const char *lensName = rawProcessor.imgdata.lens.Lens;
-        if (lensName && lensName[0]) {
+        if (lensName && lensName[0])
             metadata->lens = QString::fromUtf8(lensName).trimmed();
-        } else {
-            const QString lensMake = QString::fromUtf8(rawProcessor.imgdata.lens.LensMake).trimmed();
-            if (!lensMake.isEmpty()) {
-                metadata->lens = lensMake;
-            } else {
-                const double minFocal = rawProcessor.imgdata.lens.MinFocal;
-                const double maxFocal = rawProcessor.imgdata.lens.MaxFocal;
-                const QString range = formatFocalRange(minFocal, maxFocal);
-                if (!range.isEmpty()) {
-                    metadata->lens = range;
-                }
-            }
+        else if (!(metadata->lens = QString::fromUtf8(rawProcessor.imgdata.lens.LensMake).trimmed()).isEmpty()) { }
+        else {
+            QString range = formatFocalRange(rawProcessor.imgdata.lens.MinFocal, rawProcessor.imgdata.lens.MaxFocal);
+            if (!range.isEmpty()) metadata->lens = range;
         }
-
         metadata->iso = formatIso(rawProcessor.imgdata.other.iso_speed);
         metadata->shutterSpeed = formatExposureTime(rawProcessor.imgdata.other.shutter);
         metadata->aperture = formatAperture(rawProcessor.imgdata.other.aperture);
         metadata->focalLength = formatFocalLength(rawProcessor.imgdata.other.focal_len);
-
         metadata->flash.clear();
         metadata->flashFired = false;
         metadata->focusDistance.clear();
-
         rawProcessor.recycle();
         return true;
     }
-
-    QImageReader reader(filePath);
-    reader.setAutoTransform(true);
+    QImageReader reader(filePath); reader.setAutoTransform(true);
     const QStringList keys = reader.textKeys();
-
     auto fetchText = [&](const QString &key) -> QString {
-        if (keys.contains(key)) {
-            return reader.text(key).trimmed();
-        }
-        return {};
+        return keys.contains(key) ? reader.text(key).trimmed() : QString();
     };
+    metadata->cameraMake = fetchText("Exif.Image.Make");
+    metadata->cameraModel = fetchText("Exif.Image.Model");
 
-    metadata->cameraMake = fetchText(QStringLiteral("Exif.Image.Make"));
-    metadata->cameraModel = fetchText(QStringLiteral("Exif.Image.Model"));
-
-    const QString lensModel = fetchText(QStringLiteral("Exif.Photo.LensModel"));
-    const QString lensSpecification = fetchText(QStringLiteral("Exif.Photo.LensSpecification"));
-    if (!lensModel.isEmpty()) {
-        metadata->lens = lensModel;
-    } else if (!lensSpecification.isEmpty()) {
-        const QStringList tokens = lensSpecification.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    if (!(metadata->lens = fetchText("Exif.Photo.LensModel")).isEmpty()) {}
+    else if (!fetchText("Exif.Photo.LensSpecification").isEmpty()) {
+        auto tokens = fetchText("Exif.Photo.LensSpecification").split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (tokens.size() >= 2) {
-            bool okMin = false;
-            bool okMax = false;
-            const double minFocal = parseRationalString(tokens.at(0), &okMin);
-            const double maxFocal = parseRationalString(tokens.at(1), &okMax);
-            const QString formatted = formatFocalRange(okMin ? minFocal : 0.0, okMax ? maxFocal : 0.0);
-            if (!formatted.isEmpty()) {
-                metadata->lens = formatted;
-            }
+            bool okMin = false, okMax = false;
+            double minFocal = parseRationalString(tokens[0], &okMin);
+            double maxFocal = parseRationalString(tokens[1], &okMax);
+            QString formatted = formatFocalRange(okMin ? minFocal : 0.0, okMax ? maxFocal : 0.0);
+            if (!formatted.isEmpty()) metadata->lens = formatted;
         }
     }
-    if (metadata->lens.isEmpty()) {
-        metadata->lens = fetchText(QStringLiteral("Exif.Photo.LensMake"));
-    }
+    if (metadata->lens.isEmpty()) metadata->lens = fetchText("Exif.Photo.LensMake");
 
     bool okValue = false;
-    double numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.ISOSpeedRatings")), &okValue);
-    if (!okValue) {
-        numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.ISOSpeed")), &okValue);
-    }
-    if (okValue) {
-        metadata->iso = formatIso(numeric);
-    }
+    double numeric;
+    numeric = parseRationalString(fetchText("Exif.Photo.ISOSpeedRatings"), &okValue);
+    if (!okValue) numeric = parseRationalString(fetchText("Exif.Photo.ISOSpeed"), &okValue);
+    if (okValue) metadata->iso = formatIso(numeric);
 
-    numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.ExposureTime")), &okValue);
-    if (okValue) {
-        metadata->shutterSpeed = formatExposureTime(numeric);
-    }
+    numeric = parseRationalString(fetchText("Exif.Photo.ExposureTime"), &okValue);
+    if (okValue) metadata->shutterSpeed = formatExposureTime(numeric);
 
-    numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.FNumber")), &okValue);
-    if (okValue) {
-        metadata->aperture = formatAperture(numeric);
-    }
+    numeric = parseRationalString(fetchText("Exif.Photo.FNumber"), &okValue);
+    if (okValue) metadata->aperture = formatAperture(numeric);
 
-    numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.FocalLength")), &okValue);
-    if (okValue) {
-        metadata->focalLength = formatFocalLength(numeric);
-    }
+    numeric = parseRationalString(fetchText("Exif.Photo.FocalLength"), &okValue);
+    if (okValue) metadata->focalLength = formatFocalLength(numeric);
 
-    const QString flashText = fetchText(QStringLiteral("Exif.Photo.Flash"));
+    QString flashText = fetchText("Exif.Photo.Flash");
     if (!flashText.isEmpty()) {
         bool okFlash = false;
-        const int flashValue = flashText.toInt(&okFlash);
-        if (okFlash) {
-            metadata->flash = describeFlash(flashValue, &metadata->flashFired);
-        } else {
-            metadata->flash = flashText;
-        }
+        int flashValue = flashText.toInt(&okFlash);
+        metadata->flash = okFlash ? describeFlash(flashValue, &metadata->flashFired) : flashText;
     }
 
-    numeric = parseRationalString(fetchText(QStringLiteral("Exif.Photo.SubjectDistance")), &okValue);
-    if (okValue) {
-        metadata->focusDistance = formatFocusDistance(numeric);
-    }
+    numeric = parseRationalString(fetchText("Exif.Photo.SubjectDistance"), &okValue);
+    if (okValue) metadata->focusDistance = formatFocusDistance(numeric);
 
-    if (metadata->lens.isEmpty()) {
-        metadata->lens = fetchText(QStringLiteral("Exif.Photo.LensMake"));
-    }
-
+    if (metadata->lens.isEmpty())
+        metadata->lens = fetchText("Exif.Photo.LensMake");
     return true;
 }
-
 } // namespace ImageLoader

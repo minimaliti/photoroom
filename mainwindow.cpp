@@ -13,6 +13,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGraphicsBlurEffect>
 #include <QGraphicsView>
 #include <QImage>
 #include <QImageReader>
@@ -290,6 +291,11 @@ void MainWindow::ensureDevelopViewInitialized()
     m_developPixmapItem = m_developScene->addPixmap(QPixmap());
     m_developPixmapItem->setVisible(false);
 
+    m_developBlurEffect = new QGraphicsBlurEffect(this);
+    m_developBlurEffect->setBlurRadius(18.0);
+    m_developBlurEffect->setEnabled(false);
+    m_developPixmapItem->setGraphicsEffect(m_developBlurEffect);
+
     initializeDevelopHistogram();
 }
 
@@ -336,9 +342,6 @@ void MainWindow::clearDevelopView()
     if (ui->developImageInfoLabel) {
         ui->developImageInfoLabel->setText(tr("No image selected"));
     }
-    if (ui->developHistogramHintLabel) {
-        ui->developHistogramHintLabel->setText(tr("Histogram will appear when an image is loaded."));
-    }
     auto resetLabel = [](QLabel *label) {
         if (label) {
             label->setText(QStringLiteral("—"));
@@ -366,15 +369,15 @@ void MainWindow::clearDevelopView()
         ui->developZoomCombo->setCurrentIndex(0);
     }
     resetHistogram();
+    if (m_developBlurEffect) {
+        m_developBlurEffect->setEnabled(false);
+    }
 }
 
 void MainWindow::resetHistogram()
 {
     if (m_histogramWidget) {
         m_histogramWidget->clear();
-    }
-    if (ui->developHistogramHintLabel) {
-        ui->developHistogramHintLabel->setText(tr("Histogram will appear when an image is loaded."));
     }
 }
 
@@ -390,9 +393,6 @@ void MainWindow::showDevelopLoadingState(const QString &message)
     }
     if (ui->developImageInfoLabel) {
         ui->developImageInfoLabel->setText(message);
-    }
-    if (ui->developHistogramHintLabel) {
-        ui->developHistogramHintLabel->setText(tr("Computing histogram…"));
     }
     if (m_histogramWidget) {
         m_histogramWidget->setStatusMessage(tr("Computing histogram…"));
@@ -420,6 +420,31 @@ void MainWindow::showDevelopLoadingState(const QString &message)
     if (ui->developMetadataCaptureDateValue) {
         ui->developMetadataCaptureDateValue->setText(QStringLiteral("—"));
     }
+}
+
+void MainWindow::showDevelopPreview(const QPixmap &pixmap)
+{
+    if (!m_developScene || !m_developPixmapItem || pixmap.isNull()) {
+        return;
+    }
+
+    m_developPixmapItem->setPixmap(pixmap);
+    m_developPixmapItem->setVisible(true);
+    m_developScene->setSceneRect(pixmap.rect());
+
+    if (m_developBlurEffect) {
+        m_developBlurEffect->setEnabled(true);
+    }
+
+    if (ui->developViewerStack && ui->developImageViewPage) {
+        ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
+    }
+
+    if (ui->stackedWidget && ui->developPage) {
+        ui->stackedWidget->setCurrentWidget(ui->developPage);
+    }
+
+    fitDevelopViewToImage();
 }
 
 void MainWindow::updateHistogram(const HistogramData &histogram)
@@ -691,10 +716,6 @@ void MainWindow::populateDevelopMetadata(const QImage &image, const QString &fil
         const QDateTime captured = info.birthTime().isValid() ? info.birthTime() : info.lastModified();
         ui->developMetadataCaptureDateValue->setText(locale.toString(captured, QLocale::ShortFormat));
     }
-
-    if (ui->developHistogramHintLabel) {
-        ui->developHistogramHintLabel->setText(tr("Histogram will update automatically as you adjust the image."));
-    }
 }
 
 const LibraryAsset *MainWindow::assetById(qint64 assetId) const
@@ -818,6 +839,26 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
     const QString displayName = QFileInfo(filePath).fileName();
     showDevelopLoadingState(tr("Loading %1…").arg(displayName));
 
+    if (const LibraryAsset *asset = assetById(assetId)) {
+        const QString previewPath = assetPreviewPath(*asset);
+        if (!previewPath.isEmpty()) {
+            QPixmap previewPixmap;
+
+            QImageReader previewReader(previewPath);
+            previewReader.setAutoTransform(true);
+            const QImage previewImage = previewReader.read();
+            if (!previewImage.isNull()) {
+                previewPixmap = QPixmap::fromImage(previewImage);
+            } else {
+                previewPixmap.load(previewPath);
+            }
+
+            if (!previewPixmap.isNull()) {
+                showDevelopPreview(previewPixmap);
+            }
+        }
+    }
+
     m_pendingDevelopFilePath = filePath;
     const int requestId = ++m_pendingDevelopRequestId;
 
@@ -864,6 +905,10 @@ void MainWindow::handleDevelopImageLoaded()
     m_developPixmapItem->setPixmap(pix);
     m_developPixmapItem->setVisible(true);
     m_developScene->setSceneRect(pix.rect());
+
+    if (m_developBlurEffect) {
+        m_developBlurEffect->setEnabled(false);
+    }
 
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
