@@ -14,7 +14,7 @@ struct PreviewJob
     qint64 assetId = -1;
     QString sourcePath;
     QString previewPath;
-    int maxHeight = 200;
+    int maxHeight = 512;
 };
 
 struct PreviewResult

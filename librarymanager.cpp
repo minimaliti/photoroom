@@ -16,7 +16,7 @@ namespace {
 constexpr auto kDatabaseFileName = "library.db";
 constexpr auto kOriginalsDirName = "originals";
 constexpr auto kPreviewsDirName = "previews";
-constexpr int kPreviewHeight = 200;
+constexpr int kPreviewHeight = 512;
 constexpr int kAssetsPerBucket = 128;
 
 QString bucketName(int bucketIndex)
