@@ -30,9 +30,14 @@ struct DevelopImageLoadResult
     qint64 assetId = -1;
     QString filePath;
     QImage image;
-    HistogramData histogram;
     DevelopMetadata metadata;
     QString errorMessage;
+};
+
+struct HistogramTaskResult
+{
+    int requestId = 0;
+    HistogramData histogram;
 };
 
 class MainWindow : public QMainWindow
@@ -77,6 +82,8 @@ private:
     int m_pendingDevelopRequestId = 0;
     QString m_pendingDevelopFilePath;
     QFutureWatcher<DevelopImageLoadResult> *m_imageLoadWatcher = nullptr;
+    QFutureWatcher<HistogramTaskResult> *m_histogramWatcher = nullptr;
+    int m_activeHistogramRequestId = 0;
 
     void clearLibrary();
     void clearDevelopView();
@@ -97,10 +104,13 @@ private:
     void showDevelopLoadingState(const QString &message);
     void handleDevelopImageLoaded();
     void updateHistogram(const HistogramData &histogram);
+    void handleHistogramReady();
+    void requestHistogramComputation(const QImage &image, int requestId);
     void resetHistogram();
     void selectFilmstripItem(qint64 assetId);
 
     LibraryManager *m_libraryManager = nullptr;
+    void openOrCreateDefaultLibrary();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

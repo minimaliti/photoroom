@@ -28,9 +28,7 @@
 #include <QResizeEvent>
 #include <QStringList>
 #include <QTransform>
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QColorSpace>
-#endif
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtGlobal>
 #include <QFuture>
@@ -154,7 +152,6 @@ DevelopImageLoadResult loadDevelopImageAsync(int requestId, qint64 assetId, cons
     }
 
     result.image = image;
-    result.histogram = computeHistogram(image);
     ImageLoader::extractMetadata(filePath, &result.metadata, nullptr);
     return result;
 }
@@ -183,6 +180,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_imageLoadWatcher = new QFutureWatcher<DevelopImageLoadResult>(this);
     connect(m_imageLoadWatcher, &QFutureWatcher<DevelopImageLoadResult>::finished,
             this, &MainWindow::handleDevelopImageLoaded);
+
+    m_histogramWatcher = new QFutureWatcher<HistogramTaskResult>(this);
+    connect(m_histogramWatcher, &QFutureWatcher<HistogramTaskResult>::finished,
+            this, &MainWindow::handleHistogramReady);
 
     ensureDevelopViewInitialized();
 
@@ -268,6 +269,7 @@ MainWindow::MainWindow(QWidget *parent)
         ui->actionImport->setEnabled(false);
     }
 
+    openOrCreateDefaultLibrary();
 }
 
 void MainWindow::ensureDevelopViewInitialized()
@@ -493,6 +495,47 @@ void MainWindow::updateHistogram(const HistogramData &histogram)
             ui->developHistogramHintLabel->setText(hints.join(QLatin1Char('\n')));
         }
     }
+}
+
+void MainWindow::handleHistogramReady()
+{
+    if (!m_histogramWatcher) {
+        return;
+    }
+
+    const HistogramTaskResult result = m_histogramWatcher->result();
+    if (result.requestId != m_activeHistogramRequestId) {
+        return;
+    }
+
+    updateHistogram(result.histogram);
+}
+
+void MainWindow::requestHistogramComputation(const QImage &image, int requestId)
+{
+    if (!m_histogramWatcher) {
+        return;
+    }
+
+    if (image.isNull()) {
+        resetHistogram();
+        return;
+    }
+
+    m_activeHistogramRequestId = requestId;
+
+    if (m_histogramWidget) {
+        m_histogramWidget->setStatusMessage(tr("Computing histogram…"));
+    }
+
+    auto future = QtConcurrent::run([requestId, image]() {
+        HistogramTaskResult taskResult;
+        taskResult.requestId = requestId;
+        taskResult.histogram = computeHistogram(image);
+        return taskResult;
+    });
+
+    m_histogramWatcher->setFuture(future);
 }
 
 void MainWindow::bindLibrarySignals()
@@ -806,6 +849,58 @@ void MainWindow::showStatusMessage(const QString &message, int timeoutMs)
     }
 }
 
+void MainWindow::openOrCreateDefaultLibrary()
+{
+    if (!m_libraryManager) {
+        return;
+    }
+
+    const QString picturesDir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+    if (picturesDir.isEmpty()) {
+        qWarning() << "Unable to determine Pictures directory for default library.";
+        showStatusMessage(tr("Unable to determine default library location."), 4000);
+        return;
+    }
+
+    QDir picturesPath(picturesDir);
+    if (!picturesPath.exists()) {
+        if (!picturesPath.mkpath(QStringLiteral("."))) {
+            qWarning() << "Unable to create Pictures directory for default library at" << picturesDir;
+            showStatusMessage(tr("Unable to prepare default library directory."), 4000);
+            return;
+        }
+    }
+
+    const QString defaultLibraryName = tr("Photoroom Library");
+    const QString defaultLibraryPath = picturesPath.filePath(defaultLibraryName);
+
+    QString openError;
+    if (m_libraryManager->openLibrary(defaultLibraryPath, &openError)) {
+        if (ui->stackedWidget && ui->libraryPage) {
+            ui->stackedWidget->setCurrentWidget(ui->libraryPage);
+        }
+        return;
+    }
+
+    QString createError;
+    if (m_libraryManager->createLibrary(defaultLibraryPath, &createError)) {
+        showStatusMessage(tr("Created default library at %1")
+                              .arg(QDir::toNativeSeparators(defaultLibraryPath)), 5000);
+        if (ui->stackedWidget && ui->libraryPage) {
+            ui->stackedWidget->setCurrentWidget(ui->libraryPage);
+        }
+        return;
+    }
+
+    const QString failureReason = !createError.isEmpty() ? createError : openError;
+    if (!failureReason.isEmpty()) {
+        qWarning() << "Failed to prepare default library:" << failureReason;
+        QMessageBox::warning(this,
+                             tr("Default library unavailable"),
+                             tr("Could not prepare the default library.\n%1").arg(failureReason));
+    }
+}
+
 void MainWindow::clearLibrary()
 {
     m_assets.clear();
@@ -921,7 +1016,7 @@ void MainWindow::handleDevelopImageLoaded()
     fitDevelopViewToImage();
 
     populateDevelopMetadata(result.image, result.filePath, result.metadata);
-    updateHistogram(result.histogram);
+    requestHistogramComputation(result.image, result.requestId);
 
     m_currentDevelopAssetId = result.assetId;
     selectFilmstripItem(result.assetId);

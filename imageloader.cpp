@@ -215,6 +215,7 @@ QImage loadRawImage(const QString &filePath, QString *errorMessage)
     rawProcessor.imgdata.params.output_color = 1; // sRGB
     rawProcessor.imgdata.params.no_auto_bright = 0;
     rawProcessor.imgdata.params.use_camera_wb = 1;
+    rawProcessor.imgdata.params.half_size = 1;
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
         const QString reason = QObject::tr("LibRaw dcraw_process failed: %1").arg(QString::fromUtf8(libraw_strerror(ret)));
@@ -340,10 +341,7 @@ unsupported_bitmap:
 
 QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage){
     if (isRawFile(filePath)) {
-        QImage image = loadRawImage(filePath, errorMessage);
-        if (!image.isNull())
-            image = image.scaled(image.width() / 2, image.height() / 2, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        return image;
+        return loadRawImage(filePath, errorMessage);
     }
     QImageReader reader(filePath);
     reader.setAutoTransform(true);
