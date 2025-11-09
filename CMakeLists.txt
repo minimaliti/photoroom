@@ -34,6 +34,12 @@ set(PROJECT_SOURCES
     previewgenerator.h
     histogramwidget.cpp
     histogramwidget.h
+    jobmanager.cpp
+    jobmanager.h
+    jobspanel.cpp
+    jobspanel.h
+    jobswindow.cpp
+    jobswindow.h
     developtypes.h
 )
 

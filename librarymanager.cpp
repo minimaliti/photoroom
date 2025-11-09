@@ -2,6 +2,7 @@
 
 #include "imageloader.h"
 #include "previewgenerator.h"
+#include "jobmanager.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -44,9 +45,17 @@ LibraryManager::LibraryManager(QObject *parent)
             return;
         }
 
+        const QUuid jobId = m_previewJobIds.take(result.assetId);
         if (!result.success) {
+            if (m_jobManager && !jobId.isNull()) {
+                m_jobManager->failJob(jobId, result.errorMessage);
+            }
             emit errorOccurred(result.errorMessage);
             return;
+        }
+
+        if (m_jobManager && !jobId.isNull()) {
+            m_jobManager->completeJob(jobId, tr("Preview generated"));
         }
 
         QSqlQuery update(m_database);
@@ -181,6 +190,15 @@ bool LibraryManager::openLibrary(const QString &directoryPath, QString *errorMes
 
 void LibraryManager::closeLibrary()
 {
+    if (m_jobManager) {
+        for (const QUuid &jobId : std::as_const(m_previewJobIds)) {
+            if (!jobId.isNull()) {
+                m_jobManager->cancelJob(jobId, tr("Library closed"));
+            }
+        }
+    }
+    m_previewJobIds.clear();
+
     if (!m_connectionName.isEmpty()) {
         if (m_database.isOpen()) {
             m_database.close();
@@ -191,6 +209,11 @@ void LibraryManager::closeLibrary()
     m_database = QSqlDatabase();
     m_libraryPath.clear();
     emit libraryClosed();
+}
+
+void LibraryManager::setJobManager(JobManager *jobManager)
+{
+    m_jobManager = jobManager;
 }
 
 QVector<LibraryAsset> LibraryManager::assets() const
@@ -477,6 +500,14 @@ void LibraryManager::enqueuePreviewGeneration(const LibraryAsset &asset)
     job.sourcePath = absoluteAssetPath(asset.originalRelativePath);
     job.previewPath = absoluteAssetPath(asset.previewRelativePath);
     job.maxHeight = kPreviewHeight;
+
+    if (m_jobManager) {
+        const QString title = tr("Generating preview");
+        const QString detail = QFileInfo(job.sourcePath).fileName();
+        QUuid jobId = m_jobManager->startJob(JobCategory::PreviewGeneration, title, detail);
+        m_jobManager->setIndeterminate(jobId, true);
+        m_previewJobIds.insert(asset.id, jobId);
+    }
 
     m_previewGenerator->enqueueJob(job);
 }

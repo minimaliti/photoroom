@@ -3,6 +3,8 @@
 #include "preferencesdialog.h"
 #include "librarygridview.h"
 #include "histogramwidget.h"
+#include "jobmanager.h"
+#include "jobswindow.h"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -165,6 +167,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
 
     m_libraryManager = new LibraryManager(this);
+    setupJobSystem();
     bindLibrarySignals();
 
     m_libraryGridView = new LibraryGridView(this);
@@ -324,6 +327,15 @@ void MainWindow::clearDevelopView()
     m_developZoom = 1.0;
     m_developFitMode = true;
 
+    if (m_jobManager && !m_activeDevelopJobId.isNull()) {
+        m_jobManager->cancelJob(m_activeDevelopJobId, tr("Develop view reset"));
+        m_activeDevelopJobId = {};
+    }
+    if (m_jobManager && !m_activeHistogramJobId.isNull()) {
+        m_jobManager->cancelJob(m_activeHistogramJobId, tr("Histogram reset"));
+        m_activeHistogramJobId = {};
+    }
+
     if (m_developPixmapItem) {
         m_developPixmapItem->setPixmap(QPixmap());
         m_developPixmapItem->setVisible(false);
@@ -422,6 +434,10 @@ void MainWindow::showDevelopLoadingState(const QString &message)
     if (ui->developMetadataCaptureDateValue) {
         ui->developMetadataCaptureDateValue->setText(QStringLiteral("—"));
     }
+
+    if (m_jobManager && !m_activeDevelopJobId.isNull()) {
+        m_jobManager->updateDetail(m_activeDevelopJobId, message);
+    }
 }
 
 void MainWindow::showDevelopPreview(const QPixmap &pixmap)
@@ -447,6 +463,10 @@ void MainWindow::showDevelopPreview(const QPixmap &pixmap)
     }
 
     fitDevelopViewToImage();
+
+    if (m_jobManager && !m_activeDevelopJobId.isNull()) {
+        m_jobManager->updateDetail(m_activeDevelopJobId, tr("Preview ready"));
+    }
 }
 
 void MainWindow::updateHistogram(const HistogramData &histogram)
@@ -508,7 +528,17 @@ void MainWindow::handleHistogramReady()
         return;
     }
 
+    const bool valid = result.histogram.isValid();
     updateHistogram(result.histogram);
+
+    if (m_jobManager && !m_activeHistogramJobId.isNull()) {
+        if (valid) {
+            m_jobManager->completeJob(m_activeHistogramJobId, tr("Histogram ready"));
+        } else {
+            m_jobManager->failJob(m_activeHistogramJobId, tr("Unable to compute histogram"));
+        }
+        m_activeHistogramJobId = {};
+    }
 }
 
 void MainWindow::requestHistogramComputation(const QImage &image, int requestId)
@@ -519,7 +549,21 @@ void MainWindow::requestHistogramComputation(const QImage &image, int requestId)
 
     if (image.isNull()) {
         resetHistogram();
+        if (m_jobManager && !m_activeHistogramJobId.isNull()) {
+            m_jobManager->cancelJob(m_activeHistogramJobId, tr("Histogram cancelled"));
+            m_activeHistogramJobId = {};
+        }
         return;
+    }
+
+    if (m_jobManager) {
+        if (!m_activeHistogramJobId.isNull()) {
+            m_jobManager->cancelJob(m_activeHistogramJobId, tr("Histogram superseded"));
+        }
+        m_activeHistogramJobId = m_jobManager->startJob(JobCategory::Histogram,
+                                                        tr("Computing histogram"),
+                                                        tr("Analyzing tonal data"));
+        m_jobManager->setIndeterminate(m_activeHistogramJobId, true);
     }
 
     m_activeHistogramRequestId = requestId;
@@ -564,17 +608,125 @@ void MainWindow::bindLibrarySignals()
     connect(m_libraryManager, &LibraryManager::assetsChanged, this, &MainWindow::refreshLibraryView);
     connect(m_libraryManager, &LibraryManager::assetPreviewUpdated, this, &MainWindow::updateThumbnailPreview);
 
-    connect(m_libraryManager, &LibraryManager::importProgress, this, [this](int imported, int total) {
-        showStatusMessage(tr("Importing items %1/%2").arg(imported).arg(total), 0);
-    });
+    connect(m_libraryManager, &LibraryManager::importProgress, this, &MainWindow::handleImportProgress);
+    connect(m_libraryManager, &LibraryManager::importCompleted, this, &MainWindow::handleImportCompleted);
+    connect(m_libraryManager, &LibraryManager::errorOccurred, this, &MainWindow::handleLibraryError);
+}
 
-    connect(m_libraryManager, &LibraryManager::importCompleted, this, [this]() {
-        showStatusMessage(tr("Import completed"), 2000);
-    });
+void MainWindow::setupJobSystem()
+{
+    if (!m_jobManager) {
+        m_jobManager = new JobManager(this);
+    }
 
-    connect(m_libraryManager, &LibraryManager::errorOccurred, this, [this](const QString &message) {
-        QMessageBox::warning(this, tr("Library error"), message);
-    });
+    if (m_libraryManager) {
+        m_libraryManager->setJobManager(m_jobManager);
+    }
+
+    if (!m_jobsWindow) {
+        m_jobsWindow = new JobsWindow(this);
+        connect(m_jobsWindow, &JobsWindow::visibilityChanged, this, [this](bool visible) {
+            if (!m_toggleJobsAction) {
+                return;
+            }
+            QSignalBlocker blocker(m_toggleJobsAction);
+            m_toggleJobsAction->setChecked(visible);
+        });
+    }
+    m_jobsWindow->setJobManager(m_jobManager);
+
+    if (!m_toggleJobsAction) {
+        m_toggleJobsAction = new QAction(tr("Jobs"), this);
+        m_toggleJobsAction->setCheckable(true);
+        connect(m_toggleJobsAction, &QAction::triggered, this, &MainWindow::toggleJobsWindow);
+        if (ui->toolBar) {
+            ui->toolBar->addSeparator();
+            ui->toolBar->addAction(m_toggleJobsAction);
+        }
+    }
+
+    connect(m_jobManager, &JobManager::jobAdded, this, &MainWindow::handleJobListChanged);
+    connect(m_jobManager, &JobManager::jobRemoved, this, &MainWindow::handleJobListChanged);
+    connect(m_jobManager, &JobManager::jobUpdated, this, &MainWindow::handleJobListChanged);
+
+    updateJobsActionBadge();
+}
+
+void MainWindow::toggleJobsWindow()
+{
+    if (!m_jobsWindow || !m_toggleJobsAction) {
+        return;
+    }
+
+    if (m_jobsWindow->isVisible()) {
+        m_jobsWindow->hide();
+        return;
+    }
+
+    QWidget *anchor = ui->toolBar ? ui->toolBar->widgetForAction(m_toggleJobsAction) : nullptr;
+    m_jobsWindow->showRelativeTo(anchor ? anchor : this);
+}
+
+void MainWindow::handleJobListChanged()
+{
+    updateJobsActionBadge();
+
+    if (!m_jobManager || !m_jobsWindow) {
+        return;
+    }
+}
+
+void MainWindow::updateJobsActionBadge()
+{
+    if (!m_toggleJobsAction || !m_jobManager) {
+        return;
+    }
+
+    const int active = m_jobManager->activeJobCount();
+    QString label = tr("Jobs");
+    if (active > 0) {
+        label = tr("Jobs (%1)").arg(active);
+    }
+    m_toggleJobsAction->setText(label);
+    m_toggleJobsAction->setStatusTip(tr("Show current background activity"));
+}
+
+void MainWindow::handleImportProgress(int imported, int total)
+{
+    showStatusMessage(tr("Importing items %1/%2").arg(imported).arg(total), 0);
+
+    if (!m_importJobActive || !m_jobManager || m_activeImportJobId.isNull()) {
+        return;
+    }
+
+    m_jobManager->updateProgress(m_activeImportJobId, imported, total);
+    m_jobManager->updateDetail(m_activeImportJobId,
+                               tr("%1 of %2 photos processed").arg(imported).arg(total));
+}
+
+void MainWindow::handleImportCompleted()
+{
+    showStatusMessage(tr("Import completed"), 2000);
+
+    if (m_jobManager && m_importJobActive && !m_activeImportJobId.isNull()) {
+        m_jobManager->completeJob(m_activeImportJobId, tr("Import completed"));
+    }
+
+    m_importJobActive = false;
+    m_activeImportJobId = {};
+    m_activeImportTotal = 0;
+}
+
+void MainWindow::handleLibraryError(const QString &message)
+{
+    QMessageBox::warning(this, tr("Library error"), message);
+
+    if (m_jobManager && m_importJobActive && !m_activeImportJobId.isNull()) {
+        m_jobManager->failJob(m_activeImportJobId, message);
+        m_importJobActive = false;
+        m_activeImportJobId = {};
+        m_activeImportTotal = 0;
+    }
 }
 
 void MainWindow::refreshLibraryView()
@@ -934,6 +1086,16 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
     const QString displayName = QFileInfo(filePath).fileName();
     showDevelopLoadingState(tr("Loading %1…").arg(displayName));
 
+    if (m_jobManager) {
+        if (!m_activeDevelopJobId.isNull()) {
+            m_jobManager->cancelJob(m_activeDevelopJobId, tr("Superseded by a new selection"));
+        }
+        m_activeDevelopJobId = m_jobManager->startJob(JobCategory::Develop,
+                                                      tr("Preparing %1").arg(displayName),
+                                                      tr("Loading original file"));
+        m_jobManager->setIndeterminate(m_activeDevelopJobId, true);
+    }
+
     if (const LibraryAsset *asset = assetById(assetId)) {
         const QString previewPath = assetPreviewPath(*asset);
         if (!previewPath.isEmpty()) {
@@ -974,6 +1136,13 @@ void MainWindow::handleDevelopImageLoaded()
     }
 
     if (!result.errorMessage.isEmpty() || result.image.isNull()) {
+        if (m_jobManager && !m_activeDevelopJobId.isNull()) {
+            const QString errorText = result.errorMessage.isEmpty()
+                    ? tr("Failed to load image.")
+                    : result.errorMessage;
+            m_jobManager->failJob(m_activeDevelopJobId, errorText);
+            m_activeDevelopJobId = {};
+        }
         QMessageBox::warning(this,
                              tr("Unable to open image"),
                              tr("Could not open %1.\n%2")
@@ -1020,6 +1189,11 @@ void MainWindow::handleDevelopImageLoaded()
 
     m_currentDevelopAssetId = result.assetId;
     selectFilmstripItem(result.assetId);
+
+    if (m_jobManager && !m_activeDevelopJobId.isNull()) {
+        m_jobManager->completeJob(m_activeDevelopJobId, tr("Ready for Develop"));
+        m_activeDevelopJobId = {};
+    }
 
     if (ui->developZoomCombo) {
         QSignalBlocker blocker(ui->developZoomCombo);
@@ -1214,6 +1388,23 @@ void MainWindow::on_actionImport_triggered()
                                                       filter);
     if (files.isEmpty()) {
         return;
+    }
+
+    if (m_jobManager) {
+        if (m_importJobActive && !m_activeImportJobId.isNull()) {
+            m_jobManager->cancelJob(m_activeImportJobId, tr("Import superseded"));
+        }
+        const QString detail = tr("%1 items").arg(files.size());
+        m_activeImportJobId = m_jobManager->startJob(JobCategory::Import,
+                                                     tr("Importing photos"),
+                                                     detail);
+        if (files.size() > 0) {
+            m_jobManager->updateProgress(m_activeImportJobId, 0, files.size());
+        } else {
+            m_jobManager->setIndeterminate(m_activeImportJobId, true);
+        }
+        m_importJobActive = true;
+        m_activeImportTotal = files.size();
     }
 
     m_libraryManager->importFiles(files);

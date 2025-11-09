@@ -8,6 +8,7 @@
 #include <QString>
 #include <QVector>
 #include <QHash>
+#include <QUuid>
 
 struct LibraryAsset
 {
@@ -22,6 +23,7 @@ struct LibraryAsset
 };
 
 class PreviewGenerator;
+class JobManager;
 
 class LibraryManager : public QObject
 {
@@ -36,6 +38,8 @@ public:
     bool createLibrary(const QString &directoryPath, QString *errorMessage = nullptr);
     bool openLibrary(const QString &directoryPath, QString *errorMessage = nullptr);
     void closeLibrary();
+
+    void setJobManager(JobManager *jobManager);
 
     QVector<LibraryAsset> assets() const;
     QString resolvePath(const QString &relativePath) const;
@@ -75,6 +79,8 @@ private:
     QString m_connectionName;
     QSqlDatabase m_database;
     PreviewGenerator *m_previewGenerator = nullptr;
+    JobManager *m_jobManager = nullptr;
+    QHash<qint64, QUuid> m_previewJobIds;
 };
 
 #endif // LIBRARYMANAGER_H

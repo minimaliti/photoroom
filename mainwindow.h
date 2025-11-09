@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QList>
 #include <QMainWindow>
+#include <QUuid>
 #include <QString>
 #include <QVector>
 
@@ -23,6 +24,9 @@ QT_END_NAMESPACE
 
 class LibraryGridView;
 class HistogramWidget;
+class JobManager;
+class JobsWindow;
+class QAction;
 
 struct DevelopImageLoadResult
 {
@@ -66,6 +70,12 @@ private slots:
     void openAssetInDevelop(qint64 assetId, const QString &filePath);
     void handleSelectionChanged(const QList<qint64> &selection);
 
+    void toggleJobsWindow();
+    void handleImportProgress(int imported, int total);
+    void handleImportCompleted();
+    void handleLibraryError(const QString &message);
+    void handleJobListChanged();
+
 private:
     Ui::MainWindow *ui;
     QGraphicsScene *m_developScene = nullptr;
@@ -106,11 +116,23 @@ private:
     void updateHistogram(const HistogramData &histogram);
     void handleHistogramReady();
     void requestHistogramComputation(const QImage &image, int requestId);
+    void setupJobSystem();
+    void updateJobsActionBadge();
     void resetHistogram();
     void selectFilmstripItem(qint64 assetId);
 
     LibraryManager *m_libraryManager = nullptr;
+    JobManager *m_jobManager = nullptr;
+    JobsWindow *m_jobsWindow = nullptr;
+    QAction *m_toggleJobsAction = nullptr;
     void openOrCreateDefaultLibrary();
+
+    QUuid m_activeImportJobId;
+    int m_activeImportTotal = 0;
+    bool m_importJobActive = false;
+
+    QUuid m_activeDevelopJobId;
+    QUuid m_activeHistogramJobId;
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
