@@ -17,6 +17,17 @@ struct DevelopAdjustmentRenderResult
     QImage image;
     bool cancelled = false;
     qint64 elapsedMs = 0;
+    bool isPreview = false;
+    double displayScale = 1.0;
+};
+
+struct DevelopAdjustmentRequest
+{
+    int requestId = 0;
+    QImage image;
+    DevelopAdjustments adjustments;
+    bool isPreview = false;
+    double displayScale = 1.0;
 };
 
 class DevelopAdjustmentEngine : public QObject
@@ -31,17 +42,13 @@ public:
     explicit DevelopAdjustmentEngine(QObject *parent = nullptr);
     ~DevelopAdjustmentEngine() override;
 
-    QFuture<DevelopAdjustmentRenderResult> renderAsync(int requestId,
-                                                       const QImage &source,
-                                                       const DevelopAdjustments &adjustments);
+    QFuture<DevelopAdjustmentRenderResult> renderAsync(DevelopAdjustmentRequest request);
 
     void cancelActive();
 
 private:
 
-    QFuture<DevelopAdjustmentRenderResult> startRender(int requestId,
-                                                       const QImage &source,
-                                                       const DevelopAdjustments &adjustments,
+    QFuture<DevelopAdjustmentRenderResult> startRender(DevelopAdjustmentRequest request,
                                                        const std::shared_ptr<CancellationToken> &token);
 
     std::shared_ptr<CancellationToken> makeActiveToken();

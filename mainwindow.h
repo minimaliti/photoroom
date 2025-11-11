@@ -139,11 +139,18 @@ private:
                                const std::function<double(int)> &sliderToValue,
                                const std::function<int(double)> &valueToSlider);
     void handleAdjustmentChanged();
-    void handleAdjustmentRenderFinished();
     void requestAdjustmentRender(bool forceImmediate = false);
+    void handleAdjustmentRenderResult(const DevelopAdjustmentRenderResult &result);
+    void startPreviewRender();
+    void startFullRender();
+    bool shouldUsePreviewRender() const;
+    void ensurePreviewImageReady();
     bool adjustmentsAreIdentity(const DevelopAdjustments &adjustments) const;
     void syncAdjustmentControls(const DevelopAdjustments &adjustments);
-    void applyDevelopImage(const QImage &image, bool updateHistogram = true);
+    void applyDevelopImage(const QImage &image,
+                           bool updateHistogram = true,
+                           bool isPreview = false,
+                           double displayScale = 1.0);
     void persistCurrentAdjustments();
     void scheduleAdjustmentPersist();
     void loadAdjustmentsForAsset(qint64 assetId);
@@ -167,8 +174,13 @@ private:
     QImage m_currentDevelopAdjustedImage;
     bool m_currentDevelopAdjustedValid = false;
     DevelopAdjustmentEngine *m_adjustmentEngine = nullptr;
-    QFutureWatcher<DevelopAdjustmentRenderResult> *m_adjustmentWatcher = nullptr;
-    int m_pendingAdjustmentRequestId = 0;
+    QTimer m_fullRenderTimer;
+    QImage m_currentDevelopPreviewImage;
+    double m_currentDevelopPreviewScale = 1.0;
+    int m_nextAdjustmentRequestId = 0;
+    int m_latestPreviewRequestId = 0;
+    int m_latestFullRequestId = 0;
+    bool m_previewRenderEnabled = false;
     bool m_savingAdjustmentsPending = false;
     QTimer m_adjustmentPersistTimer;
 

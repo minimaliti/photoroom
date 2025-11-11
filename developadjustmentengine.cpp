@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -318,6 +319,7 @@ void processRange(const RowRange &range,
                   const QImage &source,
                   QImage &target,
                   const AdjustmentPrecompute &pre,
+                  bool isPreview,
                   const std::shared_ptr<DevelopAdjustmentEngine::CancellationToken> &token)
 {
     if (token && token->cancelled.load(std::memory_order_relaxed)) {
@@ -393,8 +395,10 @@ void processRange(const RowRange &range,
             applyHueShift(r, g, b, pre.hueShift, pre.saturationShift, pre.luminanceShift);
             applyVignette(r, g, b, x, y, pre);
             applyGrain(r, g, b, x, y, pre);
-            applySharpening(source, target, x, y, r, g, b, pre);
-            applyNoiseReduction(r, g, b, pre);
+            if (!isPreview) {
+                applySharpening(source, target, x, y, r, g, b, pre);
+                applyNoiseReduction(r, g, b, pre);
+            }
 
             dstLine[idx + 0] = static_cast<uchar>(clamp01(r) * 255.0f + 0.5f);
             dstLine[idx + 1] = static_cast<uchar>(clamp01(g) * 255.0f + 0.5f);
@@ -406,6 +410,7 @@ void processRange(const RowRange &range,
 
 DevelopAdjustmentRenderResult renderImage(const QImage &source,
                                           const DevelopAdjustments &adjustments,
+                                          bool isPreview,
                                           const std::shared_ptr<DevelopAdjustmentEngine::CancellationToken> &token)
 {
     DevelopAdjustmentRenderResult result;
@@ -443,7 +448,7 @@ DevelopAdjustmentRenderResult renderImage(const QImage &source,
     timer.start();
 
     QtConcurrent::blockingMap(ranges, [&](const RowRange &range) {
-        processRange(range, working, target, pre, token);
+        processRange(range, working, target, pre, isPreview, token);
     });
 
     result.elapsedMs = timer.elapsed();
@@ -490,24 +495,22 @@ void DevelopAdjustmentEngine::cancelActive()
 }
 
 QFuture<DevelopAdjustmentRenderResult> DevelopAdjustmentEngine::startRender(
-    int requestId,
-    const QImage &source,
-    const DevelopAdjustments &adjustments,
+    DevelopAdjustmentRequest request,
     const std::shared_ptr<CancellationToken> &token)
 {
-    return QtConcurrent::run([requestId, source, adjustments, token]() {
-        DevelopAdjustmentRenderResult result = renderImage(source, adjustments, token);
-        result.requestId = requestId;
+    return QtConcurrent::run([request = std::move(request), token]() mutable {
+        DevelopAdjustmentRenderResult result = renderImage(request.image, request.adjustments, request.isPreview, token);
+        result.requestId = request.requestId;
+        result.isPreview = request.isPreview;
+        result.displayScale = request.displayScale;
         return result;
     });
 }
 
-QFuture<DevelopAdjustmentRenderResult> DevelopAdjustmentEngine::renderAsync(int requestId,
-                                                                            const QImage &source,
-                                                                            const DevelopAdjustments &adjustments)
+QFuture<DevelopAdjustmentRenderResult> DevelopAdjustmentEngine::renderAsync(DevelopAdjustmentRequest request)
 {
     auto token = makeActiveToken();
-    return startRender(requestId, source, adjustments, token);
+    return startRender(std::move(request), token);
 }
 
 

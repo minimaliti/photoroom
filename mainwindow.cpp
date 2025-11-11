@@ -411,13 +411,19 @@ void MainWindow::clearDevelopView()
     }
 
     m_adjustmentPersistTimer.stop();
+    m_fullRenderTimer.stop();
     if (m_adjustmentEngine) {
         m_adjustmentEngine->cancelActive();
     }
     m_currentDevelopOriginalImage = QImage();
     m_currentDevelopAdjustedImage = QImage();
     m_currentDevelopAdjustedValid = false;
-    m_pendingAdjustmentRequestId = 0;
+    m_currentDevelopPreviewImage = QImage();
+    m_currentDevelopPreviewScale = 1.0;
+    m_previewRenderEnabled = false;
+    m_nextAdjustmentRequestId = 0;
+    m_latestPreviewRequestId = 0;
+    m_latestFullRequestId = 0;
 
     m_currentDevelopAssetId = -1;
     m_developZoom = 1.0;
@@ -968,16 +974,16 @@ void MainWindow::setupAdjustmentEngine()
         m_adjustmentEngine = new DevelopAdjustmentEngine(this);
     }
 
-    if (!m_adjustmentWatcher) {
-        m_adjustmentWatcher = new QFutureWatcher<DevelopAdjustmentRenderResult>(this);
-        connect(m_adjustmentWatcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished,
-                this, &MainWindow::handleAdjustmentRenderFinished);
-    }
-
     m_adjustmentPersistTimer.setSingleShot(true);
     m_adjustmentPersistTimer.setInterval(350);
     connect(&m_adjustmentPersistTimer, &QTimer::timeout,
             this, &MainWindow::persistCurrentAdjustments);
+
+    m_fullRenderTimer.setSingleShot(true);
+    m_fullRenderTimer.setInterval(180);
+    connect(&m_fullRenderTimer, &QTimer::timeout, this, [this]() {
+        startFullRender();
+    });
 }
 
 void MainWindow::bindAdjustmentControl(QWidget *sliderWidget,
@@ -1037,6 +1043,7 @@ void MainWindow::initializeAdjustmentControls()
         if (!slider || !spin) {
             return;
         }
+        slider->setTracking(true);
         auto sliderToValue = [sliderScale](int raw) {
             return static_cast<double>(raw) / sliderScale;
         };
@@ -1205,7 +1212,6 @@ bool MainWindow::adjustmentsAreIdentity(const DevelopAdjustments &adjustments) c
 
 void MainWindow::requestAdjustmentRender(bool forceImmediate)
 {
-    Q_UNUSED(forceImmediate);
     if (!m_adjustmentEngine || m_currentDevelopAssetId < 0 || m_currentDevelopOriginalImage.isNull()) {
         return;
     }
@@ -1213,45 +1219,170 @@ void MainWindow::requestAdjustmentRender(bool forceImmediate)
     const bool identity = adjustmentsAreIdentity(m_currentAdjustments);
     if (identity) {
         m_adjustmentEngine->cancelActive();
+        m_fullRenderTimer.stop();
         m_currentDevelopAdjustedImage = m_currentDevelopOriginalImage;
         m_currentDevelopAdjustedValid = true;
-        applyDevelopImage(m_currentDevelopOriginalImage, true);
+        applyDevelopImage(m_currentDevelopOriginalImage, true, false, 1.0);
         return;
     }
 
     m_currentDevelopAdjustedValid = false;
     m_currentDevelopAdjustedImage = QImage();
 
-    const int requestId = ++m_pendingAdjustmentRequestId;
-    auto future = m_adjustmentEngine->renderAsync(requestId,
-                                                  m_currentDevelopOriginalImage,
-                                                  m_currentAdjustments);
-    if (m_adjustmentWatcher) {
-        m_adjustmentWatcher->setFuture(future);
+    m_fullRenderTimer.stop();
+
+    if (forceImmediate) {
+        m_previewRenderEnabled = false;
+        startFullRender();
+        return;
+    }
+
+    if (shouldUsePreviewRender()) {
+        ensurePreviewImageReady();
+        startPreviewRender();
+        m_fullRenderTimer.start();
+    } else {
+        m_previewRenderEnabled = false;
+        startFullRender();
     }
 }
 
-void MainWindow::handleAdjustmentRenderFinished()
+void MainWindow::handleAdjustmentRenderResult(const DevelopAdjustmentRenderResult &result)
 {
-    if (!m_adjustmentWatcher) {
-        return;
-    }
-
-    const DevelopAdjustmentRenderResult result = m_adjustmentWatcher->result();
-    if (result.requestId != m_pendingAdjustmentRequestId) {
-        return;
-    }
-
     if (result.cancelled || result.image.isNull()) {
+        return;
+    }
+
+    if (result.isPreview) {
+        if (result.requestId != m_latestPreviewRequestId) {
+            return;
+        }
+        applyDevelopImage(result.image, false, true, result.displayScale);
+        return;
+    }
+
+    if (result.requestId != m_latestFullRequestId) {
         return;
     }
 
     m_currentDevelopAdjustedImage = result.image;
     m_currentDevelopAdjustedValid = true;
-    applyDevelopImage(result.image, true);
+    applyDevelopImage(result.image, true, false, 1.0);
 }
 
-void MainWindow::applyDevelopImage(const QImage &image, bool updateHistogram)
+void MainWindow::startPreviewRender()
+{
+    if (!m_adjustmentEngine) {
+        return;
+    }
+
+    m_adjustmentEngine->cancelActive();
+
+    DevelopAdjustmentRequest request;
+    request.requestId = ++m_nextAdjustmentRequestId;
+    request.image = m_currentDevelopPreviewImage.isNull() ? m_currentDevelopOriginalImage : m_currentDevelopPreviewImage;
+    request.adjustments = m_currentAdjustments;
+    if (m_previewRenderEnabled) {
+        request.adjustments.sharpening = 0.0;
+        request.adjustments.noiseReduction = 0.0;
+    }
+    request.isPreview = m_previewRenderEnabled;
+    request.displayScale = m_previewRenderEnabled ? m_currentDevelopPreviewScale : 1.0;
+
+    m_latestPreviewRequestId = request.requestId;
+
+    auto future = m_adjustmentEngine->renderAsync(std::move(request));
+    auto *watcher = new QFutureWatcher<DevelopAdjustmentRenderResult>(this);
+    connect(watcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished, this, [this, watcher]() {
+        DevelopAdjustmentRenderResult result = watcher->result();
+        watcher->deleteLater();
+        handleAdjustmentRenderResult(result);
+    });
+    watcher->setFuture(future);
+}
+
+void MainWindow::startFullRender()
+{
+    if (!m_adjustmentEngine || m_currentDevelopOriginalImage.isNull()) {
+        return;
+    }
+
+    m_adjustmentEngine->cancelActive();
+
+    DevelopAdjustmentRequest request;
+    request.requestId = ++m_nextAdjustmentRequestId;
+    request.image = m_currentDevelopOriginalImage;
+    request.adjustments = m_currentAdjustments;
+    request.isPreview = false;
+    request.displayScale = 1.0;
+    m_latestFullRequestId = request.requestId;
+
+    auto future = m_adjustmentEngine->renderAsync(std::move(request));
+    auto *watcher = new QFutureWatcher<DevelopAdjustmentRenderResult>(this);
+    connect(watcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished, this, [this, watcher]() {
+        DevelopAdjustmentRenderResult result = watcher->result();
+        watcher->deleteLater();
+        handleAdjustmentRenderResult(result);
+    });
+    watcher->setFuture(future);
+}
+
+bool MainWindow::shouldUsePreviewRender() const
+{
+    if (m_currentDevelopOriginalImage.isNull()) {
+        return false;
+    }
+    const int maxDimension = qMax(m_currentDevelopOriginalImage.width(), m_currentDevelopOriginalImage.height());
+    const qint64 totalPixels = static_cast<qint64>(m_currentDevelopOriginalImage.width()) *
+                               static_cast<qint64>(m_currentDevelopOriginalImage.height());
+    if (totalPixels <= 12'000'000) { // ~12 MP
+        return false;
+    }
+    return maxDimension > 2048;
+}
+
+void MainWindow::ensurePreviewImageReady()
+{
+    if (m_currentDevelopOriginalImage.isNull()) {
+        m_currentDevelopPreviewImage = QImage();
+        m_currentDevelopPreviewScale = 1.0;
+        m_previewRenderEnabled = false;
+        return;
+    }
+
+    if (!m_currentDevelopPreviewImage.isNull()) {
+        return;
+    }
+
+    const int maxDimension = qMax(m_currentDevelopOriginalImage.width(), m_currentDevelopOriginalImage.height());
+    if (maxDimension <= 960) {
+        m_currentDevelopPreviewImage = m_currentDevelopOriginalImage;
+        m_currentDevelopPreviewScale = 1.0;
+        m_previewRenderEnabled = false;
+        return;
+    }
+
+    const double scale = 960.0 / static_cast<double>(maxDimension);
+    const int previewWidth = qMax(1, static_cast<int>(std::round(m_currentDevelopOriginalImage.width() * scale)));
+    const int previewHeight = qMax(1, static_cast<int>(std::round(m_currentDevelopOriginalImage.height() * scale)));
+    const QSize previewSize(previewWidth, previewHeight);
+    m_currentDevelopPreviewImage = m_currentDevelopOriginalImage.scaled(previewSize,
+                                                                        Qt::KeepAspectRatio,
+                                                                        Qt::FastTransformation);
+    if (m_currentDevelopPreviewImage.isNull()) {
+        m_currentDevelopPreviewScale = 1.0;
+        m_previewRenderEnabled = false;
+    } else {
+        m_currentDevelopPreviewScale = static_cast<double>(m_currentDevelopOriginalImage.width()) /
+                                       static_cast<double>(m_currentDevelopPreviewImage.width());
+        m_previewRenderEnabled = !qFuzzyCompare(m_currentDevelopPreviewScale, 1.0);
+    }
+}
+
+void MainWindow::applyDevelopImage(const QImage &image,
+                                   bool updateHistogram,
+                                   bool isPreview,
+                                   double displayScale)
 {
     if (!m_developScene || !m_developPixmapItem || image.isNull()) {
         return;
@@ -1264,7 +1395,15 @@ void MainWindow::applyDevelopImage(const QImage &image, bool updateHistogram)
 
     m_developPixmapItem->setPixmap(pixmap);
     m_developPixmapItem->setVisible(true);
-    m_developScene->setSceneRect(pixmap.rect());
+    if (isPreview && !qFuzzyCompare(displayScale, 1.0)) {
+        const QSizeF scaledSize = QSizeF(image.width() * displayScale,
+                                         image.height() * displayScale);
+        m_developScene->setSceneRect(QRectF(QPointF(0, 0), scaledSize));
+        m_developPixmapItem->setScale(displayScale);
+    } else {
+        m_developScene->setSceneRect(pixmap.rect());
+        m_developPixmapItem->setScale(1.0);
+    }
 
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
@@ -1750,13 +1889,18 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
         persistCurrentAdjustments();
     }
     m_adjustmentPersistTimer.stop();
+    m_fullRenderTimer.stop();
     if (m_adjustmentEngine) {
         m_adjustmentEngine->cancelActive();
     }
-    m_pendingAdjustmentRequestId = 0;
     m_currentDevelopAdjustedValid = false;
     m_currentDevelopOriginalImage = QImage();
     m_currentDevelopAdjustedImage = QImage();
+    m_currentDevelopPreviewImage = QImage();
+    m_currentDevelopPreviewScale = 1.0;
+    m_previewRenderEnabled = false;
+    m_latestPreviewRequestId = 0;
+    m_latestFullRequestId = 0;
 
     ensureDevelopViewInitialized();
 
@@ -1869,6 +2013,10 @@ void MainWindow::handleDevelopImageLoaded()
     m_currentDevelopAdjustedImage = QImage();
     m_currentDevelopAdjustedValid = false;
     m_developFitMode = true;
+    m_currentDevelopPreviewImage = QImage();
+    m_currentDevelopPreviewScale = 1.0;
+    m_previewRenderEnabled = false;
+    m_fullRenderTimer.stop();
 
     loadAdjustmentsForAsset(result.assetId);
 
@@ -1876,9 +2024,9 @@ void MainWindow::handleDevelopImageLoaded()
     if (identityAdjustments) {
         m_currentDevelopAdjustedImage = result.image;
         m_currentDevelopAdjustedValid = true;
-        applyDevelopImage(result.image, true);
+        applyDevelopImage(result.image, true, false, 1.0);
     } else {
-        applyDevelopImage(result.image, false);
+        applyDevelopImage(result.image, false, false, 1.0);
         requestAdjustmentRender(true);
     }
 
