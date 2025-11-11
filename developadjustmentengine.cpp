@@ -4,6 +4,12 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QElapsedTimer>
 #include <QThreadPool>
+#include <QImage>
+#include <QByteArray>
+#include <QOpenGLFunctions_4_5_Core>
+#include <QSurfaceFormat>
+#include <QVector>
+#include <QMutexLocker>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +22,186 @@
 namespace {
 
 constexpr float kInv255 = 1.0f / 255.0f;
+constexpr int kPreviewMaxDimension = 960;
+constexpr int kMaxTextureDimension = 8192;
+
+const char *kComputeShaderSource = R"(#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba32f, binding = 0) uniform readonly image2D inputImage;
+layout(rgba32f, binding = 1) uniform writeonly image2D outputImage;
+
+uniform float exposureMultiplier;
+uniform float contrastFactor;
+uniform float highlights;
+uniform float shadows;
+uniform float whites;
+uniform float blacks;
+uniform float saturationFactor;
+uniform float vibranceAmount;
+uniform float toneCurveHighlights;
+uniform float toneCurveLights;
+uniform float toneCurveDarks;
+uniform float toneCurveShadows;
+uniform float hueShift;
+uniform float saturationShift;
+uniform float luminanceShift;
+uniform float vignetteStrength;
+uniform float vignetteFalloff;
+uniform float clarityStrength;
+uniform float widthInv;
+uniform float heightInv;
+uniform float centerX;
+uniform float centerY;
+uniform int applyClarity;
+
+float clamp01(float v) {
+    return clamp(v, 0.0, 1.0);
+}
+
+float applyRange(float value, float amount, float weight) {
+    if (abs(amount) < 1e-5) return value;
+    float influence = amount * weight;
+    if (influence > 0.0) {
+        return value + (1.0 - value) * influence;
+    }
+    return value + value * influence;
+}
+
+float smoothstep01(float edge0, float edge1, float x) {
+    return smoothstep(edge0, edge1, x);
+}
+
+float hueToRgb(float p, float q, float t) {
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 0.5) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 applyHue(vec3 rgb, float hueShiftValue, float saturationShiftValue, float luminanceShiftValue) {
+    if (abs(hueShiftValue) < 1e-5 && abs(saturationShiftValue) < 1e-5 && abs(luminanceShiftValue) < 1e-5) {
+        return rgb;
+    }
+    float maxChannel = max(rgb.r, max(rgb.g, rgb.b));
+    float minChannel = min(rgb.r, min(rgb.g, rgb.b));
+    float chroma = maxChannel - minChannel;
+    float luminance = (maxChannel + minChannel) * 0.5;
+    float hue = 0.0;
+    if (chroma > 1e-5) {
+        if (maxChannel == rgb.r) {
+            hue = (rgb.g - rgb.b) / chroma;
+        } else if (maxChannel == rgb.g) {
+            hue = 2.0 + (rgb.b - rgb.r) / chroma;
+        } else {
+            hue = 4.0 + (rgb.r - rgb.g) / chroma;
+        }
+        hue /= 6.0;
+        if (hue < 0.0) hue += 1.0;
+    }
+    float saturation = chroma / (1.0 - abs(2.0 * luminance - 1.0) + 1e-5);
+    saturation = clamp01(saturation + saturationShiftValue);
+    luminance = clamp01(luminance + luminanceShiftValue);
+    hue = mod(hue + hueShiftValue, 1.0);
+    float q = luminance < 0.5 ? luminance * (1.0 + saturation) : luminance + saturation - luminance * saturation;
+    float p = 2.0 * luminance - q;
+    return vec3(
+        hueToRgb(p, q, hue + 1.0 / 3.0),
+        hueToRgb(p, q, hue),
+        hueToRgb(p, q, hue - 1.0 / 3.0)
+    );
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(inputImage);
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+
+    vec4 src = imageLoad(inputImage, coord);
+    vec3 rgb = src.rgb * exposureMultiplier;
+    float luminance = clamp01(dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+
+    vec3 adjustChannel(vec3 value) {
+        vec3 v = value;
+        v = (v - vec3(0.5)) * contrastFactor + vec3(0.5);
+        float highlightWeight = smoothstep01(0.55, 1.0, luminance);
+        float shadowWeight = smoothstep01(0.0, 0.45, 1.0 - luminance);
+        float whitesWeight = smoothstep01(0.7, 1.0, luminance);
+        float blacksWeight = smoothstep01(0.0, 0.3, 1.0 - luminance);
+        v = vec3(applyRange(v.r, highlights, highlightWeight),
+                 applyRange(v.g, highlights, highlightWeight),
+                 applyRange(v.b, highlights, highlightWeight));
+        v = vec3(applyRange(v.r, shadows, shadowWeight),
+                 applyRange(v.g, shadows, shadowWeight),
+                 applyRange(v.b, shadows, shadowWeight));
+        v = vec3(applyRange(v.r, whites, whitesWeight),
+                 applyRange(v.g, whites, whitesWeight),
+                 applyRange(v.b, whites, whitesWeight));
+        v = vec3(applyRange(v.r, blacks, blacksWeight),
+                 applyRange(v.g, blacks, blacksWeight),
+                 applyRange(v.b, blacks, blacksWeight));
+        float toneHighlight = smoothstep01(0.6, 1.0, luminance);
+        float toneLight = smoothstep01(0.4, 0.8, luminance);
+        float toneDark = smoothstep01(0.2, 0.6, 1.0 - luminance);
+        float toneShadow = smoothstep01(0.0, 0.3, 1.0 - luminance);
+        v = vec3(applyRange(v.r, toneCurveHighlights, toneHighlight),
+                 applyRange(v.g, toneCurveHighlights, toneHighlight),
+                 applyRange(v.b, toneCurveHighlights, toneHighlight));
+        v = vec3(applyRange(v.r, toneCurveLights, toneLight),
+                 applyRange(v.g, toneCurveLights, toneLight),
+                 applyRange(v.b, toneCurveLights, toneLight));
+        v = vec3(applyRange(v.r, toneCurveDarks, toneDark),
+                 applyRange(v.g, toneCurveDarks, toneDark),
+                 applyRange(v.b, toneCurveDarks, toneDark));
+        v = vec3(applyRange(v.r, toneCurveShadows, toneShadow),
+                 applyRange(v.g, toneCurveShadows, toneShadow),
+                 applyRange(v.b, toneCurveShadows, toneShadow));
+        return clamp(v, vec3(0.0), vec3(1.0));
+    }
+
+    rgb = adjustChannel(rgb);
+
+    float midToneInfluence = 1.0 - abs(luminance - 0.5) * 2.0;
+    if (applyClarity == 1) {
+        float clarityFactor = 1.0 + clarityStrength * midToneInfluence;
+        rgb = clamp((rgb - vec3(luminance)) * clarityFactor + vec3(luminance), 0.0, 1.0);
+    }
+
+    float maxChannel = max(rgb.r, max(rgb.g, rgb.b));
+    float minChannel = min(rgb.r, min(rgb.g, rgb.b));
+    float chroma = maxChannel - minChannel;
+    float saturationLevel = maxChannel > 0.0 ? chroma / (maxChannel + 1e-5) : 0.0;
+
+    float combinedSaturation = saturationFactor;
+    if (vibranceAmount > 1e-5) {
+        float vibranceFactor = 1.0 + vibranceAmount * (1.0 - saturationLevel);
+        combinedSaturation *= vibranceFactor;
+    } else if (vibranceAmount < -1e-5) {
+        float vibranceFactor = 1.0 + vibranceAmount * saturationLevel;
+        combinedSaturation *= max(0.0, vibranceFactor);
+    }
+    float newLuminance = clamp01(dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+    rgb = clamp(vec3(newLuminance) + (rgb - vec3(newLuminance)) * combinedSaturation, 0.0, 1.0);
+
+    rgb = applyHue(rgb, hueShift, saturationShift, luminanceShift);
+
+    float dx = (float(coord.x) - centerX) * widthInv;
+    float dy = (float(coord.y) - centerY) * heightInv;
+    float distance = sqrt(dx * dx + dy * dy);
+    float weight = clamp(distance * vignetteFalloff, 0.0, 1.0);
+    float influence = vignetteStrength * weight * weight;
+    if (influence >= 0.0) {
+        rgb += (vec3(1.0) - rgb) * influence;
+    } else {
+        rgb += rgb * influence;
+    }
+
+    imageStore(outputImage, coord, vec4(clamp(rgb, 0.0, 1.0), src.a));
+}
+)";
 
 struct RowRange
 {
@@ -408,10 +594,10 @@ void processRange(const RowRange &range,
     }
 }
 
-DevelopAdjustmentRenderResult renderImage(const QImage &source,
-                                          const DevelopAdjustments &adjustments,
-                                          bool isPreview,
-                                          const std::shared_ptr<DevelopAdjustmentEngine::CancellationToken> &token)
+DevelopAdjustmentRenderResult renderImageCpu(const QImage &source,
+                                             const DevelopAdjustments &adjustments,
+                                             bool isPreview,
+                                             const std::shared_ptr<DevelopAdjustmentEngine::CancellationToken> &token)
 {
     DevelopAdjustmentRenderResult result;
     if (source.isNull()) {
@@ -472,6 +658,14 @@ DevelopAdjustmentEngine::DevelopAdjustmentEngine(QObject *parent)
 DevelopAdjustmentEngine::~DevelopAdjustmentEngine()
 {
     cancelActive();
+    if (m_computeProgram != 0 && m_glContext) {
+        QMutexLocker locker(&m_glMutex);
+        m_glContext->makeCurrent(m_offscreenSurface.get());
+        QOpenGLFunctions_4_5_Core funcs;
+        funcs.initializeOpenGLFunctions();
+        funcs.glDeleteProgram(m_computeProgram);
+        m_glContext->doneCurrent();
+    }
 }
 
 std::shared_ptr<DevelopAdjustmentEngine::CancellationToken> DevelopAdjustmentEngine::makeActiveToken()
@@ -498,8 +692,13 @@ QFuture<DevelopAdjustmentRenderResult> DevelopAdjustmentEngine::startRender(
     DevelopAdjustmentRequest request,
     const std::shared_ptr<CancellationToken> &token)
 {
-    return QtConcurrent::run([request = std::move(request), token]() mutable {
-        DevelopAdjustmentRenderResult result = renderImage(request.image, request.adjustments, request.isPreview, token);
+    return QtConcurrent::run([this, request = std::move(request), token]() mutable {
+        DevelopAdjustmentRenderResult result;
+        if (initializeGpu()) {
+            result = renderWithGpu(request, token);
+        } else {
+            result = renderWithCpu(request, token);
+        }
         result.requestId = request.requestId;
         result.isPreview = request.isPreview;
         result.displayScale = request.displayScale;
@@ -511,6 +710,236 @@ QFuture<DevelopAdjustmentRenderResult> DevelopAdjustmentEngine::renderAsync(Deve
 {
     auto token = makeActiveToken();
     return startRender(std::move(request), token);
+}
+
+bool DevelopAdjustmentEngine::initializeGpu()
+{
+    if (m_gpuInitialized) {
+        return m_gpuAvailable;
+    }
+
+    m_gpuInitialized = true;
+
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setVersion(4, 5);
+    format.setOption(QSurfaceFormat::DebugContext);
+
+    auto context = std::make_unique<QOpenGLContext>();
+    context->setFormat(format);
+    if (!context->create()) {
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    auto surface = std::make_unique<QOffscreenSurface>();
+    surface->setFormat(format);
+    surface->create();
+
+    if (!surface->isValid()) {
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    if (!context->makeCurrent(surface.get())) {
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    QOpenGLFunctions_4_5_Core funcs;
+    funcs.initializeOpenGLFunctions();
+
+    GLuint shader = funcs.glCreateShader(GL_COMPUTE_SHADER);
+    funcs.glShaderSource(shader, 1, &kComputeShaderSource, nullptr);
+    funcs.glCompileShader(shader);
+    GLint compileStatus = 0;
+    funcs.glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+    if (!compileStatus) {
+        funcs.glDeleteShader(shader);
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    GLuint program = funcs.glCreateProgram();
+    funcs.glAttachShader(program, shader);
+    funcs.glLinkProgram(program);
+    GLint linkStatus = 0;
+    funcs.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+    funcs.glDeleteShader(shader);
+    if (!linkStatus) {
+        funcs.glDeleteProgram(program);
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    m_computeProgram = program;
+    m_glContext = std::move(context);
+    m_offscreenSurface = std::move(surface);
+    m_glContext->doneCurrent();
+    m_gpuAvailable = true;
+    return true;
+}
+
+DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const DevelopAdjustmentRequest &request,
+                                                                     const std::shared_ptr<CancellationToken> &token)
+{
+    DevelopAdjustmentRenderResult result;
+    result.requestId = request.requestId;
+    result.isPreview = request.isPreview;
+    result.displayScale = request.displayScale;
+
+    if (token && token->cancelled.load(std::memory_order_relaxed)) {
+        result.cancelled = true;
+        return result;
+    }
+
+    if (!m_glContext || !m_offscreenSurface || m_computeProgram == 0) {
+        result = renderWithCpu(request, token);
+        return result;
+    }
+
+    QMutexLocker locker(&m_glMutex);
+    if (!m_glContext->makeCurrent(m_offscreenSurface.get())) {
+        result = renderWithCpu(request, token);
+        return result;
+    }
+
+    QOpenGLFunctions_4_5_Core funcs;
+    funcs.initializeOpenGLFunctions();
+
+    const QImage sourceImage = request.image.convertToFormat(QImage::Format_RGBA8888);
+    const int width = sourceImage.width();
+    const int height = sourceImage.height();
+
+    if (width <= 0 || height <= 0 ||
+        width > kMaxTextureDimension || height > kMaxTextureDimension) {
+        m_glContext->doneCurrent();
+        result = renderWithCpu(request, token);
+        return result;
+    }
+
+    QVector<float> textureData(width * height * 4);
+    const uchar *srcBits = sourceImage.constBits();
+    for (int i = 0; i < width * height; ++i) {
+        textureData[i * 4 + 0] = srcBits[i * 4 + 0] * kInv255;
+        textureData[i * 4 + 1] = srcBits[i * 4 + 1] * kInv255;
+        textureData[i * 4 + 2] = srcBits[i * 4 + 2] * kInv255;
+        textureData[i * 4 + 3] = srcBits[i * 4 + 3] * kInv255;
+    }
+
+    GLuint inputTex = 0;
+    GLuint outputTex = 0;
+    funcs.glGenTextures(1, &inputTex);
+    funcs.glGenTextures(1, &outputTex);
+
+    auto releaseTextures = [&]() {
+        funcs.glDeleteTextures(1, &inputTex);
+        funcs.glDeleteTextures(1, &outputTex);
+    };
+
+    funcs.glActiveTexture(GL_TEXTURE0);
+    funcs.glBindTexture(GL_TEXTURE_2D, inputTex);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    funcs.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, textureData.constData());
+
+    funcs.glBindTexture(GL_TEXTURE_2D, outputTex);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    funcs.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+
+    funcs.glUseProgram(m_computeProgram);
+
+    auto uniform = [&](const char *name, float value) {
+        GLint loc = funcs.glGetUniformLocation(m_computeProgram, name);
+        if (loc >= 0) {
+            funcs.glUniform1f(loc, value);
+        }
+    };
+    auto uniformInt = [&](const char *name, int value) {
+        GLint loc = funcs.glGetUniformLocation(m_computeProgram, name);
+        if (loc >= 0) {
+            funcs.glUniform1i(loc, value);
+        }
+    };
+
+    const AdjustmentPrecompute pre = buildPrecompute(request.adjustments,
+                                                     width,
+                                                     height);
+
+    uniform("exposureMultiplier", pre.exposureMultiplier);
+    uniform("contrastFactor", pre.contrastFactor);
+    uniform("highlights", pre.highlights);
+    uniform("shadows", pre.shadows);
+    uniform("whites", pre.whites);
+    uniform("blacks", pre.blacks);
+    uniform("saturationFactor", pre.saturationFactor);
+    uniform("vibranceAmount", pre.vibranceAmount);
+    uniform("toneCurveHighlights", pre.toneCurveHighlights);
+    uniform("toneCurveLights", pre.toneCurveLights);
+    uniform("toneCurveDarks", pre.toneCurveDarks);
+    uniform("toneCurveShadows", pre.toneCurveShadows);
+    uniform("hueShift", pre.hueShift);
+    uniform("saturationShift", pre.saturationShift);
+    uniform("luminanceShift", pre.luminanceShift);
+    uniform("vignetteStrength", pre.vignetteStrength);
+    uniform("vignetteFalloff", pre.vignetteFalloff);
+    uniform("clarityStrength", pre.clarityStrength);
+    uniform("widthInv", pre.invWidth);
+    uniform("heightInv", pre.invHeight);
+    uniform("centerX", pre.centerX);
+    uniform("centerY", pre.centerY);
+    uniformInt("applyClarity", request.isPreview ? 0 : 1);
+
+    funcs.glBindImageTexture(0, inputTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA32F);
+    funcs.glBindImageTexture(1, outputTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+
+    const GLuint groupsX = (width + 15) / 16;
+    const GLuint groupsY = (height + 15) / 16;
+    funcs.glDispatchCompute(groupsX, groupsY, 1);
+
+    funcs.glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    if (token && token->cancelled.load(std::memory_order_relaxed)) {
+        releaseTextures();
+        funcs.glUseProgram(0);
+        m_glContext->doneCurrent();
+        result.cancelled = true;
+        return result;
+    }
+
+    QVector<float> outputData(width * height * 4);
+    funcs.glBindTexture(GL_TEXTURE_2D, outputTex);
+    funcs.glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, outputData.data());
+
+    releaseTextures();
+    funcs.glUseProgram(0);
+    m_glContext->doneCurrent();
+
+    QImage outputImage(width, height, QImage::Format_RGBA8888);
+    uchar *dstBits = outputImage.bits();
+    for (int i = 0; i < width * height; ++i) {
+        dstBits[i * 4 + 0] = static_cast<uchar>(std::clamp(outputData[i * 4 + 0], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[i * 4 + 1] = static_cast<uchar>(std::clamp(outputData[i * 4 + 1], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[i * 4 + 2] = static_cast<uchar>(std::clamp(outputData[i * 4 + 2], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[i * 4 + 3] = static_cast<uchar>(std::clamp(outputData[i * 4 + 3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+
+    result.image = outputImage;
+    return result;
+}
+
+DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithCpu(const DevelopAdjustmentRequest &request,
+                                                                     const std::shared_ptr<CancellationToken> &token)
+{
+    return renderImageCpu(request.image, request.adjustments, request.isPreview, token);
 }
 
 

@@ -4,6 +4,9 @@
 #include <QObject>
 #include <QImage>
 #include <QFuture>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QMutex>
 
 #include <atomic>
 #include <memory>
@@ -55,6 +58,18 @@ private:
 
     mutable std::mutex m_mutex;
     std::shared_ptr<CancellationToken> m_activeToken;
+    bool initializeGpu();
+    DevelopAdjustmentRenderResult renderWithGpu(const DevelopAdjustmentRequest &request,
+                                                const std::shared_ptr<CancellationToken> &token);
+    DevelopAdjustmentRenderResult renderWithCpu(const DevelopAdjustmentRequest &request,
+                                                const std::shared_ptr<CancellationToken> &token);
+
+    bool m_gpuInitialized = false;
+    bool m_gpuAvailable = false;
+    std::unique_ptr<QOpenGLContext> m_glContext;
+    std::unique_ptr<QOffscreenSurface> m_offscreenSurface;
+    mutable QMutex m_glMutex;
+    GLuint m_computeProgram = 0;
 };
 
 #endif // DEVELOPADJUSTMENTENGINE_H

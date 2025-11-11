@@ -56,5 +56,6 @@ target_link_libraries(photoroom PRIVATE
     Qt6::Sql
     Qt6::Concurrent
     Qt6::OpenGLWidgets
+    Qt6::Gui
     libraw::raw
 )

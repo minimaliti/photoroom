@@ -56,6 +56,7 @@ namespace {
 
 constexpr int kHistogramBins = 256;
 constexpr int kHistogramTargetSampleCount = 750000;
+constexpr int kPreviewMaxDimension = 960;
 
 struct HistogramChunk
 {
@@ -1355,14 +1356,14 @@ void MainWindow::ensurePreviewImageReady()
     }
 
     const int maxDimension = qMax(m_currentDevelopOriginalImage.width(), m_currentDevelopOriginalImage.height());
-    if (maxDimension <= 960) {
+    if (maxDimension <= kPreviewMaxDimension) {
         m_currentDevelopPreviewImage = m_currentDevelopOriginalImage;
         m_currentDevelopPreviewScale = 1.0;
         m_previewRenderEnabled = false;
         return;
     }
 
-    const double scale = 960.0 / static_cast<double>(maxDimension);
+    const double scale = static_cast<double>(kPreviewMaxDimension) / static_cast<double>(maxDimension);
     const int previewWidth = qMax(1, static_cast<int>(std::round(m_currentDevelopOriginalImage.width() * scale)));
     const int previewHeight = qMax(1, static_cast<int>(std::round(m_currentDevelopOriginalImage.height() * scale)));
     const QSize previewSize(previewWidth, previewHeight);
