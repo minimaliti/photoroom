@@ -22,6 +22,7 @@ enum class JobCategory {
     PreviewGeneration,
     Develop,
     Histogram,
+    Export,
     Misc
 };
 

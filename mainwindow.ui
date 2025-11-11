@@ -1221,6 +1221,7 @@
     <addaction name="actionNew_Library"/>
     <addaction name="actionOpen_Library"/>
     <addaction name="actionImport"/>
+    <addaction name="actionExport"/>
     <addaction name="menuRecent_Libraries"/>
     <addaction name="separator"/>
     <addaction name="actionExit"/>
@@ -1278,6 +1279,14 @@
    </property>
    <property name="shortcut">
     <string>Ctrl+I</string>
+   </property>
+  </action>
+  <action name="actionExport">
+   <property name="text">
+    <string>Export...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+Shift+E</string>
    </property>
   </action>
   <action name="actionClear_recents">

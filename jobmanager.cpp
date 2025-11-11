@@ -234,6 +234,8 @@ QString jobCategoryToDisplayText(JobCategory category)
         return QObject::tr("Develop");
     case JobCategory::Histogram:
         return QObject::tr("Histogram");
+    case JobCategory::Export:
+        return QObject::tr("Export");
     case JobCategory::Misc:
     default:
         return QObject::tr("Task");

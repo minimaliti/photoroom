@@ -40,6 +40,8 @@ set(PROJECT_SOURCES
     jobspanel.h
     jobswindow.cpp
     jobswindow.h
+    exportdialog.cpp
+    exportdialog.h
     developadjustmentengine.cpp
     developadjustmentengine.h
     developtypes.cpp

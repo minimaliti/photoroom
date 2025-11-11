@@ -5,6 +5,7 @@
 #include "histogramwidget.h"
 #include "jobmanager.h"
 #include "jobswindow.h"
+#include "exportdialog.h"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -19,6 +20,7 @@
 #include <QGraphicsView>
 #include <QImage>
 #include <QImageReader>
+#include <QImageWriter>
 #include <QLabel>
 #include <QIcon>
 #include <QLocale>
@@ -35,13 +37,18 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtGlobal>
 #include <QFuture>
+#include <QFutureWatcher>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <utility>
+#include <memory>
+#include <QFile>
 #include <QPixmap>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSharedPointer>
 #include <QStandardPaths>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -49,6 +56,7 @@
 #include <QOpenGLWidget>
 #include <QSlider>
 #include <QDoubleSpinBox>
+#include <QSet>
 
 #include "imageloader.h"
 
@@ -57,6 +65,107 @@ namespace {
 constexpr int kHistogramBins = 256;
 constexpr int kHistogramTargetSampleCount = 750000;
 constexpr int kPreviewMaxDimension = 960;
+
+struct ExportTaskReport
+{
+    bool success = true;
+    QString errorMessage;
+    QString destinationDir;
+    QStringList exportedFiles;
+};
+
+struct ExportItem
+{
+    qint64 assetId = -1;
+    QString sourcePath;
+    DevelopAdjustments adjustments;
+    bool identity = true;
+};
+
+static QString exportExtensionForFormat(const QString &format)
+{
+    const QString lowered = format.toLower();
+    if (lowered == QStringLiteral("jpeg")) {
+        return QStringLiteral("jpg");
+    }
+    if (lowered == QStringLiteral("tiff")) {
+        return QStringLiteral("tif");
+    }
+    return lowered;
+}
+
+static QString sanitizeFileName(const QString &name)
+{
+    QString sanitized = name.trimmed();
+    static const QRegularExpression invalidChars(QStringLiteral(R"([\/\\\:\*\?"<>\|])"));
+    sanitized.replace(invalidChars, QStringLiteral("_"));
+    if (sanitized.isEmpty()) {
+        sanitized = QStringLiteral("Exported");
+    }
+    return sanitized;
+}
+
+static QString generateExportBaseName(const QFileInfo &sourceInfo,
+                                      int sequenceIndex,
+                                      const QString &namingMode,
+                                      const QString &customPattern,
+                                      int sequenceStart,
+                                      int sequencePadding,
+                                      const QString &customSuffix)
+{
+    const QString originalName = sourceInfo.completeBaseName();
+    if (namingMode == QStringLiteral("original-with-suffix")) {
+        if (customSuffix.isEmpty()) {
+            return originalName;
+        }
+        return originalName + customSuffix;
+    }
+
+    if (namingMode == QStringLiteral("custom-pattern")) {
+        QString pattern = customPattern;
+        if (pattern.isEmpty()) {
+            pattern = QStringLiteral("Export_{index}");
+        }
+
+        const int value = sequenceStart + sequenceIndex;
+        const int padding = qMax(1, sequencePadding);
+        QString numberString = QString::number(value);
+        if (numberString.size() < padding) {
+            numberString = QString(padding - numberString.size(), QLatin1Char('0')) + numberString;
+        }
+
+        QString result = pattern;
+        if (result.contains(QStringLiteral("{index}"))) {
+            result.replace(QStringLiteral("{index}"), numberString);
+        } else {
+            result.append(numberString);
+        }
+
+        if (!customSuffix.isEmpty()) {
+            result.append(customSuffix);
+        }
+        return result;
+    }
+
+    return originalName;
+}
+
+static QString ensureUniqueFileName(const QString &baseName,
+                                    const QString &extension,
+                                    QSet<QString> &usedBaseNames,
+                                    const QDir &destinationDir)
+{
+    QString candidateBase = baseName;
+    int attempt = 1;
+
+    while (usedBaseNames.contains(candidateBase) ||
+           destinationDir.exists(candidateBase + QLatin1Char('.') + extension)) {
+        candidateBase = baseName + QStringLiteral("_%1").arg(attempt++);
+    }
+
+    usedBaseNames.insert(candidateBase);
+    return candidateBase + QLatin1Char('.') + extension;
+}
 
 struct HistogramChunk
 {
@@ -2216,6 +2325,346 @@ void MainWindow::on_actionPreferences_triggered()
 
     PreferencesDialog dialog(this);
     dialog.exec();  // or dialog.show() for non-modal
+}
+
+void MainWindow::on_actionExport_triggered()
+{
+    if (!m_libraryManager || !m_libraryManager->hasOpenLibrary()) {
+        QMessageBox::information(this,
+                                 tr("No open library"),
+                                 tr("Open a library before exporting files."));
+        return;
+    }
+
+    persistCurrentAdjustments();
+
+    QVector<ExportItem> candidateItems;
+    candidateItems.reserve(32);
+    QSet<QString> seenPaths;
+
+    if (m_libraryGridView) {
+        const QList<qint64> selection = m_libraryGridView->selectedAssetIds();
+        for (qint64 assetId : selection) {
+            const LibraryAsset *asset = assetById(assetId);
+            if (!asset) {
+                continue;
+            }
+            const QString originalPath = assetOriginalPath(*asset);
+            if (originalPath.isEmpty() || seenPaths.contains(originalPath)) {
+                continue;
+            }
+
+            ExportItem item;
+            item.assetId = assetId;
+            item.sourcePath = originalPath;
+            item.adjustments = m_libraryManager ? m_libraryManager->loadDevelopAdjustments(assetId)
+                                                : defaultDevelopAdjustments();
+            item.identity = adjustmentsAreIdentity(item.adjustments);
+            candidateItems.append(item);
+            seenPaths.insert(originalPath);
+        }
+    }
+
+    if (candidateItems.isEmpty() && m_currentDevelopAssetId >= 0) {
+        const LibraryAsset *asset = assetById(m_currentDevelopAssetId);
+        if (asset) {
+            const QString originalPath = assetOriginalPath(*asset);
+            if (!originalPath.isEmpty() && !seenPaths.contains(originalPath)) {
+                ExportItem item;
+                item.assetId = m_currentDevelopAssetId;
+                item.sourcePath = originalPath;
+                item.adjustments = m_libraryManager ? m_libraryManager->loadDevelopAdjustments(m_currentDevelopAssetId)
+                                                    : defaultDevelopAdjustments();
+                item.identity = adjustmentsAreIdentity(item.adjustments);
+                candidateItems.append(item);
+                seenPaths.insert(originalPath);
+            }
+        }
+    }
+
+    if (candidateItems.isEmpty()) {
+        QMessageBox::information(this,
+                                 tr("No images selected"),
+                                 tr("Select one or more images in the library to export."));
+        return;
+    }
+
+    if (m_exportInProgress) {
+        QMessageBox::information(this,
+                                 tr("Export already running"),
+                                 tr("Please wait for the current export to finish before starting a new one."));
+        return;
+    }
+
+    QStringList candidatePaths;
+    candidatePaths.reserve(candidateItems.size());
+    for (const ExportItem &item : std::as_const(candidateItems)) {
+        candidatePaths.append(item.sourcePath);
+    }
+
+    ExportDialog dialog(this);
+    dialog.setImageList(candidatePaths, true);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const QStringList selectedPathList = dialog.selectedImages();
+    if (selectedPathList.isEmpty()) {
+        showStatusMessage(tr("No images selected for export."), 3000);
+        return;
+    }
+
+    QSet<QString> selectedPathSet;
+    selectedPathSet.reserve(selectedPathList.size());
+    for (const QString &path : selectedPathList) {
+        selectedPathSet.insert(path);
+    }
+
+    QVector<ExportItem> selectedItems;
+    selectedItems.reserve(selectedPathSet.size());
+    for (const ExportItem &item : std::as_const(candidateItems)) {
+        if (selectedPathSet.contains(item.sourcePath)) {
+            selectedItems.append(item);
+        }
+    }
+
+    if (selectedItems.isEmpty()) {
+        showStatusMessage(tr("No images selected for export."), 3000);
+        return;
+    }
+
+    QString initialDir = m_lastExportDirectory;
+    if (initialDir.isEmpty()) {
+        const QString pictures = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+        if (!pictures.isEmpty()) {
+            initialDir = pictures;
+        } else {
+            initialDir = QDir::homePath();
+        }
+    }
+
+    const QString selectedDirectory = QFileDialog::getExistingDirectory(this,
+                                                                        tr("Select Export Folder"),
+                                                                        initialDir);
+    if (selectedDirectory.isEmpty()) {
+        return;
+    }
+
+    QString destinationDir = selectedDirectory;
+    if (dialog.createSubfolder()) {
+        QDir baseDir(destinationDir);
+        const QString subfolderName = QStringLiteral("Export_%1")
+                                          .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+        if (!baseDir.mkpath(subfolderName)) {
+            QMessageBox::warning(this,
+                                 tr("Unable to create folder"),
+                                 tr("Could not create export subfolder \"%1\".").arg(subfolderName));
+            return;
+        }
+        destinationDir = baseDir.filePath(subfolderName);
+    }
+
+    QDir destination(destinationDir);
+    if (!destination.exists()) {
+        if (!destination.mkpath(QStringLiteral("."))) {
+            QMessageBox::warning(this,
+                                 tr("Unable to prepare folder"),
+                                 tr("Could not create export folder \"%1\".")
+                                     .arg(QDir::toNativeSeparators(destinationDir)));
+            return;
+        }
+    }
+
+    m_lastExportDirectory = selectedDirectory;
+
+    const QString format = dialog.exportFormat();
+    const QString extension = exportExtensionForFormat(format);
+    const bool qualityEnabled = dialog.isQualityEnabled();
+    const int quality = qualityEnabled ? dialog.quality() : 100;
+    const QString namingMode = dialog.namingMode();
+    const QString customPattern = dialog.customPattern();
+    const int sequenceStart = dialog.sequenceStart();
+    const int sequencePadding = qMax(1, dialog.sequencePadding());
+    const QString customSuffix = dialog.customSuffix();
+
+    const int totalCount = selectedItems.size();
+
+    m_exportInProgress = true;
+
+    QUuid jobId;
+    if (m_jobManager) {
+        const QString detail = tr("%1 file(s) to %2")
+                                   .arg(totalCount)
+                                   .arg(format.toUpper());
+        jobId = m_jobManager->startJob(JobCategory::Export,
+                                       tr("Exporting photos"),
+                                       detail);
+        if (totalCount > 0) {
+            m_jobManager->updateProgress(jobId, 0, totalCount);
+        } else {
+            m_jobManager->setIndeterminate(jobId, true);
+        }
+    }
+    m_activeExportJobId = jobId;
+
+    auto report = QSharedPointer<ExportTaskReport>::create();
+    report->destinationDir = destinationDir;
+
+    QPointer<JobManager> jobManagerPtr(m_jobManager);
+
+    auto future = QtConcurrent::run([items = selectedItems,
+                                     report,
+                                     destinationDir,
+                                     format,
+                                     extension,
+                                     quality,
+                                     qualityEnabled,
+                                     namingMode,
+                                     customPattern,
+                                     sequenceStart,
+                                     sequencePadding,
+                                     customSuffix,
+                                     jobId,
+                                     jobManagerPtr]() {
+        QDir destDir(destinationDir);
+        destDir.mkpath(QStringLiteral("."));
+        QSet<QString> usedBaseNames;
+
+        std::unique_ptr<DevelopAdjustmentEngine> engine;
+
+        for (int index = 0; index < items.size(); ++index) {
+            const ExportItem &exportItem = items.at(index);
+            const QString &sourcePath = exportItem.sourcePath;
+            const QFileInfo sourceInfo(sourcePath);
+
+            QString baseName = generateExportBaseName(sourceInfo,
+                                                      index,
+                                                      namingMode,
+                                                      customPattern,
+                                                      sequenceStart,
+                                                      sequencePadding,
+                                                      customSuffix);
+            baseName = sanitizeFileName(baseName);
+            const QString fileName = ensureUniqueFileName(baseName, extension, usedBaseNames, destDir);
+            const QString outputPath = destDir.absoluteFilePath(fileName);
+
+            QString loadError;
+            QImage image = ImageLoader::loadImageWithRawSupport(sourcePath, &loadError);
+            if (image.isNull()) {
+                if (loadError.isEmpty()) {
+                    loadError = QObject::tr("Failed to load \"%1\".").arg(QDir::toNativeSeparators(sourcePath));
+                }
+                report->success = false;
+                report->errorMessage = loadError;
+                break;
+            }
+
+            if (!exportItem.identity) {
+                if (!engine) {
+                    engine = std::make_unique<DevelopAdjustmentEngine>();
+                }
+
+                DevelopAdjustmentRequest request;
+                request.requestId = index + 1;
+                request.image = image;
+                request.adjustments = exportItem.adjustments;
+                request.isPreview = false;
+                request.displayScale = 1.0;
+
+                QFuture<DevelopAdjustmentRenderResult> renderFuture = engine->renderAsync(std::move(request));
+                renderFuture.waitForFinished();
+                const DevelopAdjustmentRenderResult result = renderFuture.result();
+                if (result.cancelled || result.image.isNull()) {
+                    report->success = false;
+                    report->errorMessage = QObject::tr("Failed to apply adjustments for \"%1\".")
+                                               .arg(QDir::toNativeSeparators(sourcePath));
+                    break;
+                }
+                image = result.image;
+            }
+
+            if (format == QStringLiteral("jpeg") && image.format() == QImage::Format_Indexed8) {
+                image = image.convertToFormat(QImage::Format_RGB888);
+            }
+
+            QImageWriter writer(outputPath, format.toUtf8());
+            if (qualityEnabled) {
+                writer.setQuality(quality);
+            } else {
+                writer.setQuality(100);
+            }
+
+            if (!writer.write(image)) {
+                QString err = writer.errorString();
+                if (err.isEmpty()) {
+                    err = QObject::tr("Unknown error");
+                }
+                report->success = false;
+                report->errorMessage = QObject::tr("Failed to export \"%1\": %2")
+                                           .arg(QDir::toNativeSeparators(outputPath), err);
+                break;
+            }
+
+            report->exportedFiles.append(outputPath);
+
+            if (jobManagerPtr && !jobId.isNull()) {
+                const int completed = index + 1;
+                const int total = items.size();
+                const QString detail = QObject::tr("%1 of %2 files").arg(completed).arg(total);
+                QMetaObject::invokeMethod(jobManagerPtr, [jobManagerPtr, jobId, completed, total, detail]() {
+                    if (!jobManagerPtr) {
+                        return;
+                    }
+                    jobManagerPtr->updateDetail(jobId, detail);
+                    jobManagerPtr->updateProgress(jobId, completed, total);
+                }, Qt::QueuedConnection);
+            }
+        }
+
+        if (!jobManagerPtr || jobId.isNull()) {
+            return;
+        }
+
+        if (report->success) {
+            QMetaObject::invokeMethod(jobManagerPtr, [jobManagerPtr, jobId, count = report->exportedFiles.size()]() {
+                if (!jobManagerPtr) {
+                    return;
+                }
+                jobManagerPtr->completeJob(jobId, QObject::tr("%1 file(s)").arg(count));
+            }, Qt::QueuedConnection);
+        } else {
+            QMetaObject::invokeMethod(jobManagerPtr, [jobManagerPtr, jobId, message = report->errorMessage]() {
+                if (!jobManagerPtr) {
+                    return;
+                }
+                jobManagerPtr->failJob(jobId, message);
+            }, Qt::QueuedConnection);
+        }
+    });
+
+    auto *watcher = new QFutureWatcher<void>(this);
+    connect(watcher, &QFutureWatcher<void>::finished, this, [this, watcher, report]() {
+        watcher->deleteLater();
+        m_exportInProgress = false;
+        m_activeExportJobId = {};
+
+        if (report->success) {
+            showStatusMessage(tr("Exported %1 file(s) to %2")
+                                  .arg(report->exportedFiles.size())
+                                  .arg(QDir::toNativeSeparators(report->destinationDir)),
+                              5000);
+        } else {
+            if (!report->errorMessage.isEmpty()) {
+                QMessageBox::warning(this,
+                                     tr("Export failed"),
+                                     report->errorMessage);
+            }
+            showStatusMessage(tr("Export failed"), 4000);
+        }
+    });
+    watcher->setFuture(future);
+    showStatusMessage(tr("Export started…"), 2000);
 }
 
 void MainWindow::on_actionImport_triggered()

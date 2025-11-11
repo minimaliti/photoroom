@@ -76,6 +76,7 @@ private slots:
     void on_actionInverse_Selection_triggered();
     void on_actionPreferences_triggered();
     void on_actionImport_triggered();
+    void on_actionExport_triggered();
     void openAssetInDevelop(qint64 assetId, const QString &filePath);
     void handleSelectionChanged(const QList<qint64> &selection);
 
@@ -163,8 +164,11 @@ private:
     void openOrCreateDefaultLibrary();
 
     QUuid m_activeImportJobId;
+    QUuid m_activeExportJobId;
     int m_activeImportTotal = 0;
     bool m_importJobActive = false;
+    bool m_exportInProgress = false;
+    QString m_lastExportDirectory;
 
     QUuid m_activeDevelopJobId;
     QUuid m_activeHistogramJobId;
