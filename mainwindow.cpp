@@ -47,6 +47,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QOpenGLWidget>
+#include <QSlider>
+#include <QDoubleSpinBox>
 
 #include "imageloader.h"
 
@@ -210,6 +212,11 @@ HistogramData computeHistogram(const QImage &sourceImage)
     return histogram;
 }
 
+inline bool almostEqual(double a, double b)
+{
+    return std::abs(a - b) < 1e-4;
+}
+
 DevelopImageLoadResult loadDevelopImageAsync(int requestId, qint64 assetId, const QString &filePath)
 {
     DevelopImageLoadResult result;
@@ -237,7 +244,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
+    m_currentAdjustments = defaultDevelopAdjustments();
+
     m_libraryManager = new LibraryManager(this);
+    setupAdjustmentEngine();
     setupJobSystem();
     bindLibrarySignals();
 
@@ -313,11 +323,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(ui->developZoomCombo, &QComboBox::currentTextChanged, this, &MainWindow::applyDevelopZoomPreset);
     }
 
-    if (ui->developResetAdjustmentsButton) {
-        connect(ui->developResetAdjustmentsButton, &QPushButton::clicked, this, [this]() {
-            showStatusMessage(tr("Reset adjustments (not yet implemented)"), 2000);
-        });
-    }
+    initializeAdjustmentControls();
 
     if (ui->developToggleBeforeAfterButton) {
         connect(ui->developToggleBeforeAfterButton, &QPushButton::clicked, this, [this]() {
@@ -400,6 +406,19 @@ void MainWindow::initializeDevelopHistogram()
 
 void MainWindow::clearDevelopView()
 {
+    if (m_savingAdjustmentsPending && m_currentDevelopAssetId >= 0) {
+        persistCurrentAdjustments();
+    }
+
+    m_adjustmentPersistTimer.stop();
+    if (m_adjustmentEngine) {
+        m_adjustmentEngine->cancelActive();
+    }
+    m_currentDevelopOriginalImage = QImage();
+    m_currentDevelopAdjustedImage = QImage();
+    m_currentDevelopAdjustedValid = false;
+    m_pendingAdjustmentRequestId = 0;
+
     m_currentDevelopAssetId = -1;
     m_developZoom = 1.0;
     m_developFitMode = true;
@@ -943,6 +962,460 @@ void MainWindow::selectFilmstripItem(qint64 assetId)
     }
 }
 
+void MainWindow::setupAdjustmentEngine()
+{
+    if (!m_adjustmentEngine) {
+        m_adjustmentEngine = new DevelopAdjustmentEngine(this);
+    }
+
+    if (!m_adjustmentWatcher) {
+        m_adjustmentWatcher = new QFutureWatcher<DevelopAdjustmentRenderResult>(this);
+        connect(m_adjustmentWatcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished,
+                this, &MainWindow::handleAdjustmentRenderFinished);
+    }
+
+    m_adjustmentPersistTimer.setSingleShot(true);
+    m_adjustmentPersistTimer.setInterval(350);
+    connect(&m_adjustmentPersistTimer, &QTimer::timeout,
+            this, &MainWindow::persistCurrentAdjustments);
+}
+
+void MainWindow::bindAdjustmentControl(QWidget *sliderWidget,
+                                       QWidget *spinWidget,
+                                       const std::function<void(double)> &setter,
+                                       const std::function<double()> &getter,
+                                       const std::function<double(int)> &sliderToValue,
+                                       const std::function<int(double)> &valueToSlider)
+{
+    auto *slider = qobject_cast<QSlider *>(sliderWidget);
+    auto *spin = qobject_cast<QDoubleSpinBox *>(spinWidget);
+    if (!slider || !spin) {
+        return;
+    }
+
+    spin->setKeyboardTracking(false);
+
+    connect(slider, &QSlider::valueChanged, this, [this, spin, setter, sliderToValue](int rawValue) {
+        const double actualValue = sliderToValue(rawValue);
+        setter(actualValue);
+        const double clampedValue = std::clamp(actualValue, spin->minimum(), spin->maximum());
+        QSignalBlocker spinBlock(spin);
+        spin->setValue(clampedValue);
+    });
+
+    connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, slider, setter, valueToSlider](double value) {
+        setter(value);
+        const int sliderValue = valueToSlider(value);
+        if (slider->value() != sliderValue) {
+            QSignalBlocker sliderBlock(slider);
+            slider->setValue(sliderValue);
+        }
+    });
+
+    const double currentValue = getter();
+    {
+        QSignalBlocker sliderBlock(slider);
+        slider->setValue(valueToSlider(currentValue));
+    }
+    {
+        QSignalBlocker spinBlock(spin);
+        spin->setValue(currentValue);
+    }
+}
+
+void MainWindow::initializeAdjustmentControls()
+{
+    if (!ui) {
+        return;
+    }
+
+    auto connectBasicControl = [this](QSlider *slider,
+                                      QDoubleSpinBox *spin,
+                                      std::function<double()> getter,
+                                      std::function<void(double)> setter,
+                                      double sliderScale) {
+        if (!slider || !spin) {
+            return;
+        }
+        auto sliderToValue = [sliderScale](int raw) {
+            return static_cast<double>(raw) / sliderScale;
+        };
+        auto valueToSlider = [sliderScale, slider](double value) {
+            const double clamped = std::clamp(value, slider->minimum() / sliderScale, slider->maximum() / sliderScale);
+            return static_cast<int>(std::round(clamped * sliderScale));
+        };
+        bindAdjustmentControl(slider,
+                              spin,
+                              setter,
+                              getter,
+                              sliderToValue,
+                              valueToSlider);
+    };
+
+    connectBasicControl(ui->exposureSlider,
+                        ui->exposureSpinBox,
+                        [this]() { return m_currentAdjustments.exposure; },
+                        [this](double value) {
+                            if (!almostEqual(m_currentAdjustments.exposure, value)) {
+                                m_currentAdjustments.exposure = value;
+                                handleAdjustmentChanged();
+                            }
+                        },
+                        10.0);
+
+    const auto identityGetter = [this](double DevelopAdjustments::*member) {
+        return [this, member]() {
+            return m_currentAdjustments.*member;
+        };
+    };
+    const auto identitySetter = [this](double DevelopAdjustments::*member) {
+        return [this, member](double value) {
+            double &target = m_currentAdjustments.*member;
+            if (!almostEqual(target, value)) {
+                target = value;
+                handleAdjustmentChanged();
+            }
+        };
+    };
+
+    auto connectHundredRange = [&](QSlider *slider,
+                                   QDoubleSpinBox *spin,
+                                   double DevelopAdjustments::*member) {
+        connectBasicControl(slider,
+                            spin,
+                            identityGetter(member),
+                            identitySetter(member),
+                            1.0);
+    };
+
+    connectHundredRange(ui->contrastSlider, ui->contrastSpinBox, &DevelopAdjustments::contrast);
+    connectHundredRange(ui->highlightsSlider, ui->highlightsSpinBox, &DevelopAdjustments::highlights);
+    connectHundredRange(ui->shadowsSlider, ui->shadowsSpinBox, &DevelopAdjustments::shadows);
+    connectHundredRange(ui->whitesSlider, ui->whitesSpinBox, &DevelopAdjustments::whites);
+    connectHundredRange(ui->blacksSlider, ui->blacksSpinBox, &DevelopAdjustments::blacks);
+    connectHundredRange(ui->claritySlider, ui->claritySpinBox, &DevelopAdjustments::clarity);
+    connectHundredRange(ui->vibranceSlider, ui->vibranceSpinBox, &DevelopAdjustments::vibrance);
+    connectHundredRange(ui->saturationSlider, ui->saturationSpinBox, &DevelopAdjustments::saturation);
+
+    auto connectSliderOnly = [this](QSlider *slider, double DevelopAdjustments::*member, double scale = 1.0) {
+        if (!slider) {
+            return;
+        }
+        connect(slider, &QSlider::valueChanged, this, [this, slider, member, scale](int rawValue) {
+            double value = static_cast<double>(rawValue) / scale;
+            double &target = m_currentAdjustments.*member;
+            if (!almostEqual(target, value)) {
+                target = value;
+                handleAdjustmentChanged();
+            }
+        });
+        QSignalBlocker blocker(slider);
+        slider->setValue(static_cast<int>(std::round((m_currentAdjustments.*member) * scale)));
+    };
+
+    connectSliderOnly(ui->toneCurveHighlightsSlider, &DevelopAdjustments::toneCurveHighlights);
+    connectSliderOnly(ui->toneCurveLightsSlider, &DevelopAdjustments::toneCurveLights);
+    connectSliderOnly(ui->toneCurveDarksSlider, &DevelopAdjustments::toneCurveDarks);
+    connectSliderOnly(ui->toneCurveShadowsSlider, &DevelopAdjustments::toneCurveShadows);
+
+    connectSliderOnly(ui->colorHueSlider, &DevelopAdjustments::hueShift);
+    connectSliderOnly(ui->colorSaturationSlider, &DevelopAdjustments::saturationShift);
+    connectSliderOnly(ui->colorLuminanceSlider, &DevelopAdjustments::luminanceShift);
+
+    connectSliderOnly(ui->sharpeningSlider, &DevelopAdjustments::sharpening);
+    connectSliderOnly(ui->noiseReductionSlider, &DevelopAdjustments::noiseReduction);
+    connectSliderOnly(ui->vignetteSlider, &DevelopAdjustments::vignette);
+    connectSliderOnly(ui->grainSlider, &DevelopAdjustments::grain);
+
+    if (ui->toneCurvePresetCombo) {
+        connect(ui->toneCurvePresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+            DevelopAdjustments preset = m_currentAdjustments;
+            switch (index) {
+            case 0: // Linear
+                preset.toneCurveHighlights = 0.0;
+                preset.toneCurveLights = 0.0;
+                preset.toneCurveDarks = 0.0;
+                preset.toneCurveShadows = 0.0;
+                break;
+            case 1: // Medium Contrast
+                preset.toneCurveHighlights = 25.0;
+                preset.toneCurveLights = 15.0;
+                preset.toneCurveDarks = -15.0;
+                preset.toneCurveShadows = -25.0;
+                break;
+            case 2: // Strong Contrast
+                preset.toneCurveHighlights = 35.0;
+                preset.toneCurveLights = 25.0;
+                preset.toneCurveDarks = -25.0;
+                preset.toneCurveShadows = -35.0;
+                break;
+            default:
+                break;
+            }
+            m_currentAdjustments.toneCurveHighlights = preset.toneCurveHighlights;
+            m_currentAdjustments.toneCurveLights = preset.toneCurveLights;
+            m_currentAdjustments.toneCurveDarks = preset.toneCurveDarks;
+            m_currentAdjustments.toneCurveShadows = preset.toneCurveShadows;
+            syncAdjustmentControls(m_currentAdjustments);
+            handleAdjustmentChanged();
+        });
+    }
+
+    if (ui->developResetAdjustmentsButton) {
+        connect(ui->developResetAdjustmentsButton, &QPushButton::clicked,
+                this, &MainWindow::resetAdjustmentsToDefault);
+    }
+
+    syncAdjustmentControls(m_currentAdjustments);
+}
+
+void MainWindow::handleAdjustmentChanged()
+{
+    if (m_currentDevelopAssetId < 0) {
+        return;
+    }
+    m_savingAdjustmentsPending = true;
+    scheduleAdjustmentPersist();
+    requestAdjustmentRender();
+}
+
+bool MainWindow::adjustmentsAreIdentity(const DevelopAdjustments &adjustments) const
+{
+    return almostEqual(adjustments.exposure, 0.0) &&
+           almostEqual(adjustments.contrast, 0.0) &&
+           almostEqual(adjustments.highlights, 0.0) &&
+           almostEqual(adjustments.shadows, 0.0) &&
+           almostEqual(adjustments.whites, 0.0) &&
+           almostEqual(adjustments.blacks, 0.0) &&
+           almostEqual(adjustments.clarity, 0.0) &&
+           almostEqual(adjustments.vibrance, 0.0) &&
+           almostEqual(adjustments.saturation, 0.0) &&
+           almostEqual(adjustments.toneCurveHighlights, 0.0) &&
+           almostEqual(adjustments.toneCurveLights, 0.0) &&
+           almostEqual(adjustments.toneCurveDarks, 0.0) &&
+           almostEqual(adjustments.toneCurveShadows, 0.0) &&
+           almostEqual(adjustments.hueShift, 0.0) &&
+           almostEqual(adjustments.saturationShift, 0.0) &&
+           almostEqual(adjustments.luminanceShift, 0.0) &&
+           almostEqual(adjustments.sharpening, 0.0) &&
+           almostEqual(adjustments.noiseReduction, 0.0) &&
+           almostEqual(adjustments.vignette, 0.0) &&
+           almostEqual(adjustments.grain, 0.0);
+}
+
+void MainWindow::requestAdjustmentRender(bool forceImmediate)
+{
+    Q_UNUSED(forceImmediate);
+    if (!m_adjustmentEngine || m_currentDevelopAssetId < 0 || m_currentDevelopOriginalImage.isNull()) {
+        return;
+    }
+
+    const bool identity = adjustmentsAreIdentity(m_currentAdjustments);
+    if (identity) {
+        m_adjustmentEngine->cancelActive();
+        m_currentDevelopAdjustedImage = m_currentDevelopOriginalImage;
+        m_currentDevelopAdjustedValid = true;
+        applyDevelopImage(m_currentDevelopOriginalImage, true);
+        return;
+    }
+
+    m_currentDevelopAdjustedValid = false;
+    m_currentDevelopAdjustedImage = QImage();
+
+    const int requestId = ++m_pendingAdjustmentRequestId;
+    auto future = m_adjustmentEngine->renderAsync(requestId,
+                                                  m_currentDevelopOriginalImage,
+                                                  m_currentAdjustments);
+    if (m_adjustmentWatcher) {
+        m_adjustmentWatcher->setFuture(future);
+    }
+}
+
+void MainWindow::handleAdjustmentRenderFinished()
+{
+    if (!m_adjustmentWatcher) {
+        return;
+    }
+
+    const DevelopAdjustmentRenderResult result = m_adjustmentWatcher->result();
+    if (result.requestId != m_pendingAdjustmentRequestId) {
+        return;
+    }
+
+    if (result.cancelled || result.image.isNull()) {
+        return;
+    }
+
+    m_currentDevelopAdjustedImage = result.image;
+    m_currentDevelopAdjustedValid = true;
+    applyDevelopImage(result.image, true);
+}
+
+void MainWindow::applyDevelopImage(const QImage &image, bool updateHistogram)
+{
+    if (!m_developScene || !m_developPixmapItem || image.isNull()) {
+        return;
+    }
+
+    const QPixmap pixmap = QPixmap::fromImage(image);
+    if (pixmap.isNull()) {
+        return;
+    }
+
+    m_developPixmapItem->setPixmap(pixmap);
+    m_developPixmapItem->setVisible(true);
+    m_developScene->setSceneRect(pixmap.rect());
+
+    if (ui->developViewerStack && ui->developImageViewPage) {
+        ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
+    }
+    if (ui->stackedWidget && ui->developPage) {
+        ui->stackedWidget->setCurrentWidget(ui->developPage);
+    }
+
+    if (m_developBlurEffect) {
+        m_developBlurEffect->setEnabled(false);
+    }
+
+    if (m_developFitMode) {
+        fitDevelopViewToImage();
+    }
+
+    if (updateHistogram) {
+        const int histogramRequestId = ++m_activeHistogramRequestId;
+        requestHistogramComputation(image, histogramRequestId);
+    }
+}
+
+void MainWindow::persistCurrentAdjustments()
+{
+    m_adjustmentPersistTimer.stop();
+    if (!m_savingAdjustmentsPending || !m_libraryManager || m_currentDevelopAssetId < 0) {
+        return;
+    }
+
+    QString error;
+    if (!m_libraryManager->saveDevelopAdjustments(m_currentDevelopAssetId, m_currentAdjustments, &error)) {
+        qWarning() << "Failed to persist adjustments:" << error;
+        showStatusMessage(tr("Unable to save adjustments: %1").arg(error), 4000);
+    } else {
+        m_savingAdjustmentsPending = false;
+    }
+}
+
+void MainWindow::scheduleAdjustmentPersist()
+{
+    if (!m_libraryManager || m_currentDevelopAssetId < 0) {
+        return;
+    }
+    m_adjustmentPersistTimer.start();
+}
+
+void MainWindow::loadAdjustmentsForAsset(qint64 assetId)
+{
+    if (!m_libraryManager || assetId < 0) {
+        m_currentAdjustments = defaultDevelopAdjustments();
+    } else {
+        m_currentAdjustments = m_libraryManager->loadDevelopAdjustments(assetId);
+    }
+    syncAdjustmentControls(m_currentAdjustments);
+    m_savingAdjustmentsPending = false;
+}
+
+void MainWindow::syncAdjustmentControls(const DevelopAdjustments &adjustments)
+{
+    auto setSliderSpin = [](QSlider *slider, QDoubleSpinBox *spin, double value, double sliderScale) {
+        if (!slider || !spin) {
+            return;
+        }
+        const int sliderMin = slider->minimum();
+        const int sliderMax = slider->maximum();
+        const double scaled = value * sliderScale;
+        const double clampedScaled = std::clamp(scaled,
+                                                static_cast<double>(sliderMin),
+                                                static_cast<double>(sliderMax));
+        const int sliderValue = static_cast<int>(std::round(clampedScaled));
+        const double spinMin = spin->minimum();
+        const double spinMax = spin->maximum();
+        const double spinValue = std::clamp(clampedScaled / sliderScale, spinMin, spinMax);
+        {
+            QSignalBlocker blockSlider(slider);
+            slider->setValue(sliderValue);
+        }
+        {
+            QSignalBlocker blockSpin(spin);
+            spin->setValue(spinValue);
+        }
+    };
+
+    setSliderSpin(ui->exposureSlider, ui->exposureSpinBox, adjustments.exposure, 10.0);
+    setSliderSpin(ui->contrastSlider, ui->contrastSpinBox, adjustments.contrast, 1.0);
+    setSliderSpin(ui->highlightsSlider, ui->highlightsSpinBox, adjustments.highlights, 1.0);
+    setSliderSpin(ui->shadowsSlider, ui->shadowsSpinBox, adjustments.shadows, 1.0);
+    setSliderSpin(ui->whitesSlider, ui->whitesSpinBox, adjustments.whites, 1.0);
+    setSliderSpin(ui->blacksSlider, ui->blacksSpinBox, adjustments.blacks, 1.0);
+    setSliderSpin(ui->claritySlider, ui->claritySpinBox, adjustments.clarity, 1.0);
+    setSliderSpin(ui->vibranceSlider, ui->vibranceSpinBox, adjustments.vibrance, 1.0);
+    setSliderSpin(ui->saturationSlider, ui->saturationSpinBox, adjustments.saturation, 1.0);
+
+    auto setSliderOnly = [](QSlider *slider, double value, double scale) {
+        if (!slider) {
+            return;
+        }
+        const int sliderMin = slider->minimum();
+        const int sliderMax = slider->maximum();
+        const double scaled = value * scale;
+        const double clampedScaled = std::clamp(scaled,
+                                                static_cast<double>(sliderMin),
+                                                static_cast<double>(sliderMax));
+        const int sliderValue = static_cast<int>(std::round(clampedScaled));
+        QSignalBlocker blocker(slider);
+        slider->setValue(sliderValue);
+    };
+
+    setSliderOnly(ui->toneCurveHighlightsSlider, adjustments.toneCurveHighlights, 1.0);
+    setSliderOnly(ui->toneCurveLightsSlider, adjustments.toneCurveLights, 1.0);
+    setSliderOnly(ui->toneCurveDarksSlider, adjustments.toneCurveDarks, 1.0);
+    setSliderOnly(ui->toneCurveShadowsSlider, adjustments.toneCurveShadows, 1.0);
+
+    setSliderOnly(ui->colorHueSlider, adjustments.hueShift, 1.0);
+    setSliderOnly(ui->colorSaturationSlider, adjustments.saturationShift, 1.0);
+    setSliderOnly(ui->colorLuminanceSlider, adjustments.luminanceShift, 1.0);
+
+    setSliderOnly(ui->sharpeningSlider, adjustments.sharpening, 1.0);
+    setSliderOnly(ui->noiseReductionSlider, adjustments.noiseReduction, 1.0);
+    setSliderOnly(ui->vignetteSlider, adjustments.vignette, 1.0);
+    setSliderOnly(ui->grainSlider, adjustments.grain, 1.0);
+
+    if (ui->toneCurvePresetCombo) {
+        int presetIndex = 0;
+        if (almostEqual(adjustments.toneCurveHighlights, 25.0) &&
+            almostEqual(adjustments.toneCurveLights, 15.0) &&
+            almostEqual(adjustments.toneCurveDarks, -15.0) &&
+            almostEqual(adjustments.toneCurveShadows, -25.0)) {
+            presetIndex = 1;
+        } else if (almostEqual(adjustments.toneCurveHighlights, 35.0) &&
+                   almostEqual(adjustments.toneCurveLights, 25.0) &&
+                   almostEqual(adjustments.toneCurveDarks, -25.0) &&
+                   almostEqual(adjustments.toneCurveShadows, -35.0)) {
+            presetIndex = 2;
+        }
+        QSignalBlocker comboBlock(ui->toneCurvePresetCombo);
+        ui->toneCurvePresetCombo->setCurrentIndex(presetIndex);
+    }
+}
+
+void MainWindow::resetAdjustmentsToDefault()
+{
+    if (adjustmentsAreIdentity(m_currentAdjustments)) {
+        return;
+    }
+    m_currentAdjustments = defaultDevelopAdjustments();
+    syncAdjustmentControls(m_currentAdjustments);
+    handleAdjustmentChanged();
+    showStatusMessage(tr("Adjustments reset"), 2000);
+}
+
 void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPath)
 {
     if (!m_libraryGridView) {
@@ -1024,11 +1497,11 @@ void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourc
         m_jobManager->setIndeterminate(jobId, true);
     }
 
-    QtConcurrent::run([this,
-                       assetId,
-                       previewPath,
-                       previewImage,
-                       jobId]() {
+    [[maybe_unused]] QFuture<void> previewFuture = QtConcurrent::run([this,
+                                                                      assetId,
+                                                                      previewPath,
+                                                                      previewImage,
+                                                                      jobId]() {
         bool success = false;
         QString errorMessage;
 
@@ -1273,6 +1746,18 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
         return;
     }
 
+    if (m_savingAdjustmentsPending && m_currentDevelopAssetId >= 0) {
+        persistCurrentAdjustments();
+    }
+    m_adjustmentPersistTimer.stop();
+    if (m_adjustmentEngine) {
+        m_adjustmentEngine->cancelActive();
+    }
+    m_pendingAdjustmentRequestId = 0;
+    m_currentDevelopAdjustedValid = false;
+    m_currentDevelopOriginalImage = QImage();
+    m_currentDevelopAdjustedImage = QImage();
+
     ensureDevelopViewInitialized();
 
     if (!m_developScene || !m_developPixmapItem) {
@@ -1377,44 +1862,29 @@ void MainWindow::handleDevelopImageLoaded()
         return;
     }
 
-    if (!m_developScene || !m_developPixmapItem) {
-        return;
-    }
-
-    const QPixmap pix = QPixmap::fromImage(result.image);
-    if (pix.isNull()) {
-        QMessageBox::warning(this,
-                             tr("Unable to display image"),
-                             tr("Failed to convert %1 to a pixmap for display.")
-                                 .arg(QFileInfo(result.filePath).fileName()));
-        clearDevelopView();
-        return;
-    }
-
-    m_developPixmapItem->setPixmap(pix);
-    m_developPixmapItem->setVisible(true);
-    m_developScene->setSceneRect(pix.rect());
-
-    if (m_developBlurEffect) {
-        m_developBlurEffect->setEnabled(false);
-    }
-
-    if (ui->developViewerStack && ui->developImageViewPage) {
-        ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
-    }
-
-    if (ui->stackedWidget && ui->developPage) {
-        ui->stackedWidget->setCurrentWidget(ui->developPage);
-    }
-
-    fitDevelopViewToImage();
-
-    populateDevelopMetadata(result.image, result.filePath, result.metadata);
-    requestHistogramComputation(result.image, result.requestId);
-
     m_currentDevelopAssetId = result.assetId;
     selectFilmstripItem(result.assetId);
-    if (ImageLoader::isRawFile(result.filePath)) {
+
+    m_currentDevelopOriginalImage = result.image;
+    m_currentDevelopAdjustedImage = QImage();
+    m_currentDevelopAdjustedValid = false;
+    m_developFitMode = true;
+
+    loadAdjustmentsForAsset(result.assetId);
+
+    const bool identityAdjustments = adjustmentsAreIdentity(m_currentAdjustments);
+    if (identityAdjustments) {
+        m_currentDevelopAdjustedImage = result.image;
+        m_currentDevelopAdjustedValid = true;
+        applyDevelopImage(result.image, true);
+    } else {
+        applyDevelopImage(result.image, false);
+        requestAdjustmentRender(true);
+    }
+
+    populateDevelopMetadata(result.image, result.filePath, result.metadata);
+
+    if (ImageLoader::isRawFile(result.filePath) && identityAdjustments) {
         schedulePreviewRegeneration(result.assetId, result.image);
     }
 

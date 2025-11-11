@@ -13,8 +13,11 @@
 #include <QUuid>
 #include <QString>
 #include <QVector>
+#include <QTimer>
+#include <functional>
 
 #include "developtypes.h"
+#include "developadjustmentengine.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -42,6 +45,12 @@ struct HistogramTaskResult
 {
     int requestId = 0;
     HistogramData histogram;
+};
+
+struct AdjustmentTaskResult
+{
+    int requestId = 0;
+    DevelopAdjustmentRenderResult renderResult;
 };
 
 class MainWindow : public QMainWindow
@@ -121,6 +130,24 @@ private:
     void schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage);
     void resetHistogram();
     void selectFilmstripItem(qint64 assetId);
+    void setupAdjustmentEngine();
+    void initializeAdjustmentControls();
+    void bindAdjustmentControl(QWidget *slider,
+                               QWidget *spinBox,
+                               const std::function<void(double)> &setter,
+                               const std::function<double()> &getter,
+                               const std::function<double(int)> &sliderToValue,
+                               const std::function<int(double)> &valueToSlider);
+    void handleAdjustmentChanged();
+    void handleAdjustmentRenderFinished();
+    void requestAdjustmentRender(bool forceImmediate = false);
+    bool adjustmentsAreIdentity(const DevelopAdjustments &adjustments) const;
+    void syncAdjustmentControls(const DevelopAdjustments &adjustments);
+    void applyDevelopImage(const QImage &image, bool updateHistogram = true);
+    void persistCurrentAdjustments();
+    void scheduleAdjustmentPersist();
+    void loadAdjustmentsForAsset(qint64 assetId);
+    void resetAdjustmentsToDefault();
 
     LibraryManager *m_libraryManager = nullptr;
     JobManager *m_jobManager = nullptr;
@@ -134,6 +161,16 @@ private:
 
     QUuid m_activeDevelopJobId;
     QUuid m_activeHistogramJobId;
+
+    DevelopAdjustments m_currentAdjustments;
+    QImage m_currentDevelopOriginalImage;
+    QImage m_currentDevelopAdjustedImage;
+    bool m_currentDevelopAdjustedValid = false;
+    DevelopAdjustmentEngine *m_adjustmentEngine = nullptr;
+    QFutureWatcher<DevelopAdjustmentRenderResult> *m_adjustmentWatcher = nullptr;
+    int m_pendingAdjustmentRequestId = 0;
+    bool m_savingAdjustmentsPending = false;
+    QTimer m_adjustmentPersistTimer;
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

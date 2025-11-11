@@ -129,6 +129,11 @@ bool LibraryManager::createLibrary(const QString &directoryPath, QString *errorM
         return false;
     }
 
+    if (!ensureDevelopAdjustmentsTable(errorMessage)) {
+        closeLibrary();
+        return false;
+    }
+
     ensurePhotoNumberSupport();
 
     emit libraryOpened(m_libraryPath);
@@ -180,6 +185,15 @@ bool LibraryManager::openLibrary(const QString &directoryPath, QString *errorMes
 
     m_libraryPath = directoryPath;
     m_database = db;
+
+    QString adjustmentsError;
+    if (!ensureDevelopAdjustmentsTable(&adjustmentsError)) {
+        if (errorMessage) {
+            *errorMessage = adjustmentsError;
+        }
+        closeLibrary();
+        return false;
+    }
 
     ensurePhotoNumberSupport();
 
@@ -388,6 +402,10 @@ bool LibraryManager::initializeDatabaseSchema(QString *errorMessage)
         if (errorMessage) {
             *errorMessage = QStringLiteral("Failed to initialize library schema: %1").arg(query.lastError().text());
         }
+        return false;
+    }
+
+    if (!ensureDevelopAdjustmentsTable(errorMessage)) {
         return false;
     }
 
@@ -616,6 +634,102 @@ void LibraryManager::ensurePhotoNumberSupport()
 
     ensurePhotoNumbersAssigned();
     ensureAssetStorageConsistency();
+}
+
+bool LibraryManager::ensureDevelopAdjustmentsTable(QString *errorMessage) const
+{
+    if (!hasOpenLibrary()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("No open library for adjustments schema.");
+        }
+        return false;
+    }
+
+    QSqlQuery query(m_database);
+    const QString createSql = QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS develop_adjustments ("
+        "asset_id INTEGER PRIMARY KEY,"
+        "payload TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL,"
+        "FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE"
+        ");");
+
+    if (!query.exec(createSql)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to ensure develop adjustments table: %1").arg(query.lastError().text());
+        }
+        return false;
+    }
+
+    QSqlQuery indexQuery(m_database);
+    if (!indexQuery.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_develop_adjustments_updated_at ON develop_adjustments(updated_at DESC)"))) {
+        // Index creation failure should not be fatal but log it.
+        qWarning() << "Failed to create develop adjustments index:" << indexQuery.lastError();
+    }
+
+    return true;
+}
+
+DevelopAdjustments LibraryManager::loadDevelopAdjustments(qint64 assetId) const
+{
+    if (!hasOpenLibrary() || assetId <= 0) {
+        return defaultDevelopAdjustments();
+    }
+
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("SELECT payload FROM develop_adjustments WHERE asset_id = ?"));
+    query.addBindValue(assetId);
+
+    if (!query.exec()) {
+        qWarning() << "Failed to load develop adjustments for asset" << assetId << query.lastError();
+        return defaultDevelopAdjustments();
+    }
+
+    if (!query.next()) {
+        return defaultDevelopAdjustments();
+    }
+
+    const QByteArray payload = query.value(0).toByteArray();
+    return deserializeAdjustments(payload);
+}
+
+bool LibraryManager::saveDevelopAdjustments(qint64 assetId,
+                                            const DevelopAdjustments &adjustments,
+                                            QString *errorMessage)
+{
+    if (!hasOpenLibrary() || assetId <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot save adjustments without an open library.");
+        }
+        return false;
+    }
+
+    const QByteArray payload = serializeAdjustments(adjustments);
+    const QString payloadText = QString::fromUtf8(payload);
+    const QString timestamp = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "INSERT INTO develop_adjustments(asset_id, payload, updated_at) "
+        "VALUES(?, ?, ?) "
+        "ON CONFLICT(asset_id) DO UPDATE SET "
+        "payload = excluded.payload, "
+        "updated_at = excluded.updated_at;"));
+    query.addBindValue(assetId);
+    query.addBindValue(payloadText);
+    query.addBindValue(timestamp);
+
+    if (!query.exec()) {
+        const QString message = QStringLiteral("Failed to persist develop adjustments: %1").arg(query.lastError().text());
+        if (errorMessage) {
+            *errorMessage = message;
+        } else {
+            qWarning() << message;
+        }
+        return false;
+    }
+
+    return true;
 }
 
 void LibraryManager::ensureAssetStorageConsistency()

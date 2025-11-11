@@ -10,6 +10,8 @@
 #include <QHash>
 #include <QUuid>
 
+#include "developtypes.h"
+
 struct LibraryAsset
 {
     qint64 id = -1;
@@ -46,6 +48,11 @@ public:
 
     void importFiles(const QStringList &filePaths);
 
+    DevelopAdjustments loadDevelopAdjustments(qint64 assetId) const;
+    bool saveDevelopAdjustments(qint64 assetId,
+                                const DevelopAdjustments &adjustments,
+                                QString *errorMessage = nullptr);
+
 signals:
     void libraryOpened(const QString &path);
     void libraryClosed();
@@ -60,6 +67,7 @@ private:
     void ensurePhotoNumbersAssigned();
     int currentMaxPhotoNumber() const;
     void ensurePhotoNumberSupport();
+    bool ensureDevelopAdjustmentsTable(QString *errorMessage = nullptr) const;
 
     QString ensureLibraryDirectories(const QString &directoryPath, QString *errorMessage);
     bool initializeDatabaseSchema(QString *errorMessage);
