@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find Packages
-find_package(Qt6 COMPONENTS Widgets Sql Concurrent REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Sql Concurrent OpenGLWidgets REQUIRED)
 find_package(LibRaw CONFIG REQUIRED)
 
 # Define all your source, header, and UI files in one place.
@@ -52,5 +52,6 @@ target_link_libraries(photoroom PRIVATE
     Qt6::Widgets
     Qt6::Sql
     Qt6::Concurrent
+    Qt6::OpenGLWidgets
     libraw::raw
 )

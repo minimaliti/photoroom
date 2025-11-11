@@ -1,14 +1,61 @@
 #include "librarygridview.h"
 
+#include <QCache>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QFuture>
+#include <QFutureWatcher>
+#include <QImageReader>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QtConcurrent>
 
 #include <algorithm>
 
 namespace {
 constexpr int kInnerPadding = 8;
+constexpr int kPreviewCacheBudgetKb = 256 * 1024; // ~256 MB
+constexpr int kPrefetchRadius = 4;
+
+QMutex &previewCacheMutex()
+{
+    static QMutex mutex;
+    return mutex;
+}
+
+QCache<QString, QPixmap> &previewCache()
+{
+    static QCache<QString, QPixmap> cache(kPreviewCacheBudgetKb);
+    return cache;
+}
+
+QString cacheKeyForPath(const QString &path)
+{
+    if (path.isEmpty()) {
+        return {};
+    }
+    QFileInfo info(path);
+    QString absolute;
+    if (info.exists()) {
+        absolute = info.canonicalFilePath();
+    }
+    if (absolute.isEmpty()) {
+        absolute = info.absoluteFilePath();
+    }
+    if (absolute.isEmpty()) {
+        absolute = path;
+    }
+    const QString cleaned = QDir::cleanPath(absolute);
+#ifdef Q_OS_WIN
+    return cleaned.toLower();
+#else
+    return cleaned;
+#endif
+}
 }
 
 LibraryGridView::LibraryGridView(QWidget *parent)
@@ -19,8 +66,14 @@ LibraryGridView::LibraryGridView(QWidget *parent)
     viewport()->setAutoFillBackground(false);
 }
 
+LibraryGridView::~LibraryGridView()
+{
+    cancelPendingLoads();
+}
+
 void LibraryGridView::setItems(const QVector<LibraryGridItem> &items)
 {
+    cancelPendingLoads();
     m_items.clear();
     m_indexLookup.clear();
     m_selectedIndices.clear();
@@ -40,11 +93,16 @@ void LibraryGridView::setItems(const QVector<LibraryGridItem> &items)
 
     updateLayoutMetrics();
     viewport()->update();
+    const int preloadCount = qMin(m_items.size(), 12);
+    for (int i = 0; i < preloadCount; ++i) {
+        ensurePixmapLoaded(i);
+    }
     emitSelectionChanged();
 }
 
 void LibraryGridView::clear()
 {
+    cancelPendingLoads();
     if (m_items.isEmpty() && m_selectedIndices.isEmpty()) {
         return;
     }
@@ -67,9 +125,20 @@ void LibraryGridView::updateItemPreview(qint64 assetId, const QString &previewPa
     }
 
     Item &item = m_items[index];
+    const QString previousPath = item.previewPath;
+    if (previousPath != previewPath) {
+        if (!previousPath.isEmpty()) {
+            const QString key = cacheKeyForPath(previousPath);
+            if (!key.isEmpty()) {
+                QMutexLocker locker(&previewCacheMutex());
+                previewCache().remove(key);
+            }
+        }
+    }
     item.previewPath = previewPath;
     item.pixmap = QPixmap();
     item.pixmapLoaded = false;
+    cancelPendingLoad(index);
 
     viewport()->update(itemRect(index, verticalScrollBar()->value()));
 }
@@ -133,6 +202,7 @@ void LibraryGridView::paintEvent(QPaintEvent *event)
             painter.drawRoundedRect(frameRect, 8, 8);
 
             ensurePixmapLoaded(index);
+            prefetchAround(index);
 
             QRect imageRect = frameRect.adjusted(kInnerPadding,
                                                 kInnerPadding,
@@ -374,14 +444,152 @@ void LibraryGridView::ensurePixmapLoaded(int index)
         return;
     }
 
-    item.pixmapLoaded = true;
+    if (item.previewPath.isEmpty()) {
+        item.pixmapLoaded = true;
+        return;
+    }
 
-    if (!item.previewPath.isEmpty() && QFile::exists(item.previewPath)) {
-        QPixmap pixmap(item.previewPath);
-        if (!pixmap.isNull()) {
-            item.pixmap = pixmap;
+    const QString key = cacheKeyForPath(item.previewPath);
+    if (!key.isEmpty()) {
+        QMutexLocker locker(&previewCacheMutex());
+        if (QPixmap *cached = previewCache().object(key)) {
+            item.pixmap = *cached;
+            item.pixmapLoaded = true;
+            return;
         }
     }
+
+    if (m_pendingLoads.contains(index)) {
+        return;
+    }
+
+    schedulePixmapLoad(index);
+}
+
+void LibraryGridView::schedulePixmapLoad(int index)
+{
+    if (index < 0 || index >= m_items.size()) {
+        return;
+    }
+
+    Item &item = m_items[index];
+    if (item.previewPath.isEmpty()) {
+        item.pixmapLoaded = true;
+        return;
+    }
+
+    auto *watcher = new QFutureWatcher<QPixmap>(this);
+    m_pendingLoads.insert(index, watcher);
+
+    const QString path = item.previewPath;
+    const QString cacheKey = cacheKeyForPath(path);
+    const QSize desiredSize = targetPreviewSize();
+
+    connect(watcher, &QFutureWatcher<QPixmap>::finished, this, [this, index, path, cacheKey, watcher]() {
+        m_pendingLoads.remove(index);
+        const QPixmap pixmap = watcher->result();
+        watcher->deleteLater();
+
+        if (index < 0 || index >= m_items.size()) {
+            return;
+        }
+
+        Item &current = m_items[index];
+        if (current.previewPath != path) {
+            return;
+        }
+
+        current.pixmapLoaded = true;
+        current.pixmap = pixmap;
+
+        if (!pixmap.isNull() && !cacheKey.isEmpty()) {
+            QMutexLocker locker(&previewCacheMutex());
+            const int cost = qMax(1, (pixmap.width() * pixmap.height()) / 16);
+            previewCache().insert(cacheKey, new QPixmap(pixmap), cost);
+        }
+
+        viewport()->update(itemRect(index, verticalScrollBar()->value()));
+        prefetchAround(index);
+    });
+
+    QFuture<QPixmap> future = QtConcurrent::run([path, desiredSize]() -> QPixmap {
+        if (path.isEmpty() || !QFile::exists(path)) {
+            return {};
+        }
+
+        QImageReader reader(path);
+        reader.setAutoTransform(true);
+        QImage image = reader.read();
+        if (!image.isNull()) {
+            if (desiredSize.isValid()) {
+                image = image.scaled(desiredSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            }
+            return QPixmap::fromImage(image);
+        }
+
+        QPixmap pix(path);
+        if (!pix.isNull() && desiredSize.isValid()) {
+            return pix.scaled(desiredSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        return pix;
+    });
+
+    watcher->setFuture(future);
+}
+
+void LibraryGridView::cancelPendingLoad(int index)
+{
+    auto it = m_pendingLoads.find(index);
+    if (it == m_pendingLoads.end()) {
+        return;
+    }
+
+    QFutureWatcher<QPixmap> *watcher = it.value();
+    m_pendingLoads.erase(it);
+    if (!watcher) {
+        return;
+    }
+    watcher->cancel();
+    watcher->deleteLater();
+}
+
+void LibraryGridView::cancelPendingLoads()
+{
+    const auto watchers = m_pendingLoads;
+    for (QFutureWatcher<QPixmap> *watcher : watchers) {
+        if (!watcher) {
+            continue;
+        }
+        watcher->cancel();
+        watcher->deleteLater();
+    }
+    m_pendingLoads.clear();
+}
+
+void LibraryGridView::prefetchAround(int index)
+{
+    if (index < 0 || index >= m_items.size()) {
+        return;
+    }
+
+    for (int offset = -kPrefetchRadius; offset <= kPrefetchRadius; ++offset) {
+        if (offset == 0) {
+            continue;
+        }
+        const int neighbor = index + offset;
+        if (neighbor < 0 || neighbor >= m_items.size()) {
+            continue;
+        }
+        ensurePixmapLoaded(neighbor);
+    }
+}
+
+QSize LibraryGridView::targetPreviewSize() const
+{
+    QSize size = m_itemSize;
+    size.rwidth() = qMax(32, size.width() - kInnerPadding * 2);
+    size.rheight() = qMax(32, size.height() - kInnerPadding * 2);
+    return size;
 }
 
 void LibraryGridView::setSelectionRange(int start, int end)
@@ -403,5 +611,6 @@ void LibraryGridView::emitSelectionChanged()
 {
     emit selectionChanged(selectedAssetIds());
 }
+
 
 

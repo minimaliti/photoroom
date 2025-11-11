@@ -18,6 +18,9 @@ QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage = 
 QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage = nullptr);
 bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString *errorMessage = nullptr);
 
+void preloadAsync(const QStringList &filePaths);
+void clearCaches();
+
 } // namespace ImageLoader
 
 #endif // IMAGELOADER_H

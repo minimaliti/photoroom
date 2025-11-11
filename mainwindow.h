@@ -118,6 +118,7 @@ private:
     void requestHistogramComputation(const QImage &image, int requestId);
     void setupJobSystem();
     void updateJobsActionBadge();
+    void schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage);
     void resetHistogram();
     void selectFilmstripItem(qint64 assetId);
 

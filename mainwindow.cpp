@@ -29,12 +29,14 @@
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QStringList>
+#include <QThreadPool>
 #include <QTransform>
 #include <QColorSpace>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtGlobal>
 #include <QFuture>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 #include <QPixmap>
@@ -44,6 +46,7 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QOpenGLWidget>
 
 #include "imageloader.h"
 
@@ -51,6 +54,70 @@ namespace {
 
 constexpr int kHistogramBins = 256;
 constexpr int kHistogramTargetSampleCount = 750000;
+
+struct HistogramChunk
+{
+    std::array<int, kHistogramBins> red{};
+    std::array<int, kHistogramBins> green{};
+    std::array<int, kHistogramBins> blue{};
+    std::array<int, kHistogramBins> luminance{};
+    int totalSamples = 0;
+};
+
+static HistogramChunk computeHistogramChunk(const QImage &image,
+                                            int startY,
+                                            int endY,
+                                            int strideStep,
+                                            bool isRgb32,
+                                            bool isRgb888)
+{
+    HistogramChunk chunk;
+    const int width = image.width();
+
+    for (int y = startY; y < endY; ++y) {
+        if (strideStep > 1 && (y % strideStep) != 0) {
+            continue;
+        }
+
+        const uchar *line = image.constScanLine(y);
+        if (!line) {
+            continue;
+        }
+
+        for (int x = 0; x < width; x += strideStep) {
+            int r = 0;
+            int g = 0;
+            int b = 0;
+
+            if (isRgb32) {
+                const QRgb pixel = reinterpret_cast<const QRgb *>(line)[x];
+                r = qRed(pixel);
+                g = qGreen(pixel);
+                b = qBlue(pixel);
+            } else if (isRgb888) {
+                const uchar *pixel = line + (x * 3);
+                r = pixel[0];
+                g = pixel[1];
+                b = pixel[2];
+            } else {
+                const uchar *pixel = line + (x * 4);
+                r = pixel[0];
+                g = pixel[1];
+                b = pixel[2];
+            }
+
+            const int luminance = qBound(0, qGray(r, g, b), 255);
+
+            chunk.red[r]++;
+            chunk.green[g]++;
+            chunk.blue[b]++;
+            chunk.luminance[luminance]++;
+            ++chunk.totalSamples;
+        }
+    }
+
+    return chunk;
+}
 
 HistogramData computeHistogram(const QImage &sourceImage)
 {
@@ -67,10 +134,17 @@ HistogramData computeHistogram(const QImage &sourceImage)
     }
 
     QImage image = sourceImage;
-    if (image.format() != QImage::Format_RGBA8888 &&
-        image.format() != QImage::Format_RGB888 &&
-        image.format() != QImage::Format_RGB32) {
-        image = image.convertToFormat(QImage::Format_RGB32);
+    switch (image.format()) {
+    case QImage::Format_RGB32:
+    case QImage::Format_ARGB32:
+    case QImage::Format_ARGB32_Premultiplied:
+    case QImage::Format_RGB888:
+    case QImage::Format_RGBA8888:
+    case QImage::Format_RGBX8888:
+        break;
+    default:
+        image = image.convertToFormat(QImage::Format_RGBA8888);
+        break;
     }
 
     const int width = image.width();
@@ -84,58 +158,55 @@ HistogramData computeHistogram(const QImage &sourceImage)
         strideStep = qBound(1, static_cast<int>(factor), 16);
     }
 
-    const bool isRgb32 = image.format() == QImage::Format_RGB32;
+    const bool isRgb32 = image.format() == QImage::Format_RGB32 ||
+                         image.format() == QImage::Format_ARGB32 ||
+                         image.format() == QImage::Format_ARGB32_Premultiplied ||
+                         image.format() == QImage::Format_RGBX8888;
     const bool isRgb888 = image.format() == QImage::Format_RGB888;
 
-    int sampleCount = 0;
-    for (int y = 0; y < height; y += strideStep) {
-        const uchar *line = image.constScanLine(y);
-        if (!line) {
-            continue;
-        }
+    const int effectiveRows = strideStep > 1 ? (height + strideStep - 1) / strideStep : height;
+    const int maxThreads = qMax(1, QThreadPool::globalInstance()->maxThreadCount());
+    const int chunkCount = qMax(1, qMin(effectiveRows, maxThreads * 2));
+    const int rowsPerChunk = qMax(1, (height + chunkCount - 1) / chunkCount);
 
-        for (int x = 0; x < width; x += strideStep) {
-            int r = 0;
-            int g = 0;
-            int b = 0;
+    QVector<QFuture<HistogramChunk>> futures;
+    futures.reserve(chunkCount);
 
-            if (isRgb32) {
-                const QRgb *pixels = reinterpret_cast<const QRgb *>(line);
-                const QRgb pixel = pixels[x];
-                r = qRed(pixel);
-                g = qGreen(pixel);
-                b = qBlue(pixel);
-            } else if (isRgb888) {
-                const uchar *pixel = line + (x * 3);
-                r = pixel[0];
-                g = pixel[1];
-                b = pixel[2];
-            } else {
-                const QRgb *pixels = reinterpret_cast<const QRgb *>(line);
-                const QRgb pixel = pixels[x];
-                r = qRed(pixel);
-                g = qGreen(pixel);
-                b = qBlue(pixel);
-            }
+    for (int startY = 0; startY < height; startY += rowsPerChunk) {
+        const int endY = qMin(height, startY + rowsPerChunk);
+        futures.append(QtConcurrent::run([image, startY, endY, strideStep, isRgb32, isRgb888]() {
+            return computeHistogramChunk(image, startY, endY, strideStep, isRgb32, isRgb888);
+        }));
+    }
 
-            const int luminance = qBound(0, qGray(r, g, b), 255);
-
-            histogram.red[r]++;
-            histogram.green[g]++;
-            histogram.blue[b]++;
-            histogram.luminance[luminance]++;
-
-            ++sampleCount;
-
-            histogram.maxValue = std::max({histogram.maxValue,
-                                           histogram.red[r],
-                                           histogram.green[g],
-                                           histogram.blue[b],
-                                           histogram.luminance[luminance]});
+    int totalSamples = 0;
+    for (QFuture<HistogramChunk> &future : futures) {
+        const HistogramChunk chunk = future.result();
+        totalSamples += chunk.totalSamples;
+        for (int i = 0; i < kHistogramBins; ++i) {
+            histogram.red[i] += chunk.red[i];
+            histogram.green[i] += chunk.green[i];
+            histogram.blue[i] += chunk.blue[i];
+            histogram.luminance[i] += chunk.luminance[i];
         }
     }
 
-    histogram.totalSamples = sampleCount;
+    int maxValue = 0;
+    for (int value : histogram.red) {
+        maxValue = std::max(maxValue, value);
+    }
+    for (int value : histogram.green) {
+        maxValue = std::max(maxValue, value);
+    }
+    for (int value : histogram.blue) {
+        maxValue = std::max(maxValue, value);
+    }
+    for (int value : histogram.luminance) {
+        maxValue = std::max(maxValue, value);
+    }
+
+    histogram.totalSamples = totalSamples;
+    histogram.maxValue = maxValue;
     return histogram;
 }
 
@@ -285,7 +356,13 @@ void MainWindow::ensureDevelopViewInitialized()
     m_developScene = new QGraphicsScene(this);
     m_developScene->setItemIndexMethod(QGraphicsScene::NoIndex);
     ui->developImageView->setScene(m_developScene);
+    if (!qobject_cast<QOpenGLWidget*>(ui->developImageView->viewport())) {
+        auto *glViewport = new QOpenGLWidget(ui->developImageView);
+        glViewport->setUpdateBehavior(QOpenGLWidget::PartialUpdate);
+        ui->developImageView->setViewport(glViewport);
+    }
     ui->developImageView->setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
+    ui->developImageView->setCacheMode(QGraphicsView::CacheBackground);
     ui->developImageView->setRenderHint(QPainter::SmoothPixmapTransform, true);
     ui->developImageView->setDragMode(QGraphicsView::ScrollHandDrag);
     ui->developImageView->setOptimizationFlags(QGraphicsView::DontSavePainterState | QGraphicsView::DontAdjustForAntialiasing);
@@ -758,6 +835,18 @@ void MainWindow::refreshLibraryView()
 
     m_libraryGridView->setItems(items);
     updateDevelopFilmstrip();
+
+    QStringList preloadPaths;
+    const int preloadCount = qMin(items.size(), 8);
+    for (int i = 0; i < preloadCount; ++i) {
+        const QString &path = items.at(i).originalPath;
+        if (!path.isEmpty()) {
+            preloadPaths.append(path);
+        }
+    }
+    if (!preloadPaths.isEmpty()) {
+        ImageLoader::preloadAsync(preloadPaths);
+    }
 }
 
 void MainWindow::updateDevelopFilmstrip()
@@ -771,7 +860,19 @@ void MainWindow::updateDevelopFilmstrip()
 
     const QSize iconSize = ui->developFilmstripList->iconSize();
 
-    for (const LibraryAsset &asset : std::as_const(m_assets)) {
+    int currentIndex = -1;
+    for (int i = 0; i < m_assets.size(); ++i) {
+        if (m_assets.at(i).id == m_currentDevelopAssetId) {
+            currentIndex = i;
+            break;
+        }
+    }
+
+    QStringList developPreload;
+    const int neighborRadius = 4;
+
+    for (int index = 0; index < m_assets.size(); ++index) {
+        const LibraryAsset &asset = m_assets.at(index);
         auto *item = new QListWidgetItem(asset.fileName);
         item->setData(Qt::UserRole, asset.id);
         item->setToolTip(asset.fileName);
@@ -797,6 +898,27 @@ void MainWindow::updateDevelopFilmstrip()
             item->setSelected(true);
             ui->developFilmstripList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
         }
+
+        if (currentIndex >= 0 && std::abs(index - currentIndex) <= neighborRadius) {
+            const QString originalPath = assetOriginalPath(asset);
+            if (!originalPath.isEmpty()) {
+                developPreload.append(originalPath);
+            }
+        }
+    }
+
+    if (developPreload.isEmpty()) {
+        const int preloadCount = qMin(m_assets.size(), 6);
+        for (int i = 0; i < preloadCount; ++i) {
+            const QString originalPath = assetOriginalPath(m_assets.at(i));
+            if (!originalPath.isEmpty()) {
+                developPreload.append(originalPath);
+            }
+        }
+    }
+
+    if (!developPreload.isEmpty()) {
+        ImageLoader::preloadAsync(developPreload);
     }
 }
 
@@ -862,6 +984,83 @@ void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPa
             }
         }
     }
+}
+
+void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage)
+{
+    if (!m_libraryManager || sourceImage.isNull()) {
+        return;
+    }
+
+    const LibraryAsset *asset = assetById(assetId);
+    if (!asset) {
+        return;
+    }
+
+    const QString previewPath = assetPreviewPath(*asset);
+    if (previewPath.isEmpty()) {
+        return;
+    }
+
+    QImage previewImage = sourceImage;
+    const int targetSize = 512;
+    if (previewImage.width() > targetSize || previewImage.height() > targetSize) {
+        previewImage = previewImage.scaled(targetSize,
+                                           targetSize,
+                                           Qt::KeepAspectRatio,
+                                           Qt::SmoothTransformation);
+    }
+
+    if (previewImage.isNull()) {
+        return;
+    }
+
+    QString jobDetail = QFileInfo(previewPath).fileName();
+    QUuid jobId;
+    if (m_jobManager) {
+        jobId = m_jobManager->startJob(JobCategory::PreviewGeneration,
+                                       tr("Updating preview"),
+                                       jobDetail);
+        m_jobManager->setIndeterminate(jobId, true);
+    }
+
+    QtConcurrent::run([this,
+                       assetId,
+                       previewPath,
+                       previewImage,
+                       jobId]() {
+        bool success = false;
+        QString errorMessage;
+
+        QDir dir = QFileInfo(previewPath).dir();
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+            errorMessage = tr("Unable to create preview directory.");
+        } else {
+            success = previewImage.save(previewPath, "JPG", 90);
+            if (!success) {
+                errorMessage = tr("Failed to save preview.");
+            }
+        }
+
+        QMetaObject::invokeMethod(this, [this, assetId, previewPath, success, errorMessage, jobId]() {
+            if (m_jobManager && !jobId.isNull()) {
+                if (success) {
+                    m_jobManager->completeJob(jobId, tr("Preview updated"));
+                    qDebug() << "Preview updated";
+                } else {
+                    m_jobManager->failJob(jobId, errorMessage.isEmpty()
+                                                    ? tr("Failed to update preview")
+                                                    : errorMessage);
+                    qDebug() << "Failed to update preview" << errorMessage;
+                }
+            }
+
+            if (success) {
+                updateThumbnailPreview(assetId, previewPath);
+                qDebug() << "Updated Thumbnail";
+            }
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MainWindow::populateDevelopMetadata(const QImage &image, const QString &filePath, const DevelopMetadata &metadata)
@@ -1119,6 +1318,32 @@ void MainWindow::openAssetInDevelop(qint64 assetId, const QString &filePath)
     m_pendingDevelopFilePath = filePath;
     const int requestId = ++m_pendingDevelopRequestId;
 
+    QStringList preloadTargets;
+    preloadTargets.append(filePath);
+    int currentIndex = -1;
+    for (int i = 0; i < m_assets.size(); ++i) {
+        if (m_assets.at(i).id == assetId) {
+            currentIndex = i;
+            break;
+        }
+    }
+    if (currentIndex >= 0) {
+        for (int offset = -3; offset <= 3; ++offset) {
+            if (offset == 0) {
+                continue;
+            }
+            const int neighborIndex = currentIndex + offset;
+            if (neighborIndex < 0 || neighborIndex >= m_assets.size()) {
+                continue;
+            }
+            const QString neighborPath = assetOriginalPath(m_assets.at(neighborIndex));
+            if (!neighborPath.isEmpty()) {
+                preloadTargets.append(neighborPath);
+            }
+        }
+    }
+    ImageLoader::preloadAsync(preloadTargets);
+
     auto future = QtConcurrent::run(loadDevelopImageAsync, requestId, assetId, filePath);
     m_imageLoadWatcher->setFuture(future);
 }
@@ -1189,6 +1414,9 @@ void MainWindow::handleDevelopImageLoaded()
 
     m_currentDevelopAssetId = result.assetId;
     selectFilmstripItem(result.assetId);
+    if (ImageLoader::isRawFile(result.filePath)) {
+        schedulePreviewRegeneration(result.assetId, result.image);
+    }
 
     if (m_jobManager && !m_activeDevelopJobId.isNull()) {
         m_jobManager->completeJob(m_activeDevelopJobId, tr("Ready for Develop"));

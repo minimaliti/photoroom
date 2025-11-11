@@ -2,6 +2,7 @@
 #define LIBRARYGRIDVIEW_H
 
 #include <QAbstractScrollArea>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QList>
 #include <QPixmap>
@@ -24,6 +25,7 @@ class LibraryGridView : public QAbstractScrollArea
     Q_OBJECT
 public:
     explicit LibraryGridView(QWidget *parent = nullptr);
+    ~LibraryGridView() override;
 
     void setItems(const QVector<LibraryGridItem> &items);
     void clear();
@@ -68,8 +70,15 @@ private:
     QRect itemRect(int index, int verticalOffset) const;
     int indexAt(const QPoint &pos) const;
     void ensurePixmapLoaded(int index);
+    void schedulePixmapLoad(int index);
+    void cancelPendingLoad(int index);
+    void cancelPendingLoads();
+    void prefetchAround(int index);
+    QSize targetPreviewSize() const;
     void setSelectionRange(int start, int end);
     void emitSelectionChanged();
+
+    QHash<int, QFutureWatcher<QPixmap>*> m_pendingLoads;
 };
 
 #endif // LIBRARYGRIDVIEW_H

@@ -1,16 +1,24 @@
 #include "imageloader.h"
 
+#include <QCache>
 #include <QColor>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QLocale>
+#include <QMutex>
+#include <QFuture>
+#include <QMutexLocker>
 #include <QObject>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QSet>
+#include <QThread>
+#include <QThreadPool>
 #include <QLinearGradient>
 #include <QStringList>
+#include <QtConcurrent>
 #include <cmath>
 #include <cstring>
 #include <QElapsedTimer>
@@ -18,6 +26,89 @@
 #include <libraw/libraw.h>
 
 namespace {
+
+// --- Shared Cache Helpers & Utilities ---
+constexpr int kImageCacheBudgetKb = 512 * 1024;     // ~512 MB
+constexpr int kPreviewCacheBudgetKb = 96 * 1024;    // ~96 MB
+
+QMutex &cacheMutex()
+{
+    static QMutex mutex;
+    return mutex;
+}
+
+QCache<QString, QImage> &imageCache()
+{
+    static QCache<QString, QImage> cache(kImageCacheBudgetKb);
+    return cache;
+}
+
+QCache<QString, QByteArray> &embeddedPreviewCache()
+{
+    static QCache<QString, QByteArray> cache(kPreviewCacheBudgetKb);
+    return cache;
+}
+
+QSet<QString> &inFlightLoads()
+{
+    static QSet<QString> set;
+    return set;
+}
+
+QString normalizedPathKey(const QString &path)
+{
+    if (path.isEmpty()) {
+        return {};
+    }
+
+    QFileInfo info(path);
+    QString absolute;
+    if (info.exists()) {
+        absolute = info.canonicalFilePath();
+    }
+    if (absolute.isEmpty()) {
+        absolute = info.absoluteFilePath();
+    }
+    if (absolute.isEmpty()) {
+        absolute = path;
+    }
+
+    const QString cleaned = QDir::cleanPath(absolute);
+#ifdef Q_OS_WIN
+    return cleaned.toLower();
+#else
+    return cleaned;
+#endif
+}
+
+int imageCostKb(const QImage &image)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
+    const qint64 bytes = image.sizeInBytes();
+#else
+    const qint64 bytes = image.byteCount();
+#endif
+    return qMax<qint64>(1, bytes / 1024);
+}
+
+int dataCostKb(const QByteArray &data)
+{
+    const qint64 bytes = data.size();
+    return qMax<qint64>(1, bytes / 1024);
+}
+
+QThreadPool *preloadThreadPool()
+{
+    static QThreadPool *pool = []() {
+        auto *threadPool = new QThreadPool();
+        const int ideal = QThread::idealThreadCount();
+        threadPool->setMaxThreadCount(qMax(2, ideal > 0 ? ideal - 1 : 2));
+        threadPool->setExpiryTimeout(30'000);
+        threadPool->setObjectName(QStringLiteral("ImageLoaderPreloadPool"));
+        return threadPool;
+    }();
+    return pool;
+}
 
 // --- Utility Lambdas for Reuse ---
 auto localeStr = [](double val, int prec = 0) { return QLocale().toString(val, 'f', prec); };
@@ -121,6 +212,14 @@ bool isRawFile(const QString &filePath) {
 }
 
 QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage) {
+    const QString key = normalizedPathKey(filePath);
+    if (!key.isEmpty()) {
+        QMutexLocker locker(&cacheMutex());
+        if (QByteArray *cached = embeddedPreviewCache().object(key)) {
+            return *cached;
+        }
+    }
+
     if (!isRawFile(filePath)) {
         if (errorMessage) *errorMessage = QStringLiteral("File is not a RAW file.");
         return {};
@@ -148,6 +247,10 @@ QByteArray loadEmbeddedRawPreview(const QString &filePath, QString *errorMessage
     rawProcessor.recycle();
     if (result.isEmpty() && errorMessage && errorMessage->isEmpty())
         *errorMessage = QStringLiteral("Embedded preview extraction returned empty data.");
+    if (!key.isEmpty() && !result.isEmpty()) {
+        QMutexLocker locker(&cacheMutex());
+        embeddedPreviewCache().insert(key, new QByteArray(result), dataCostKb(result));
+    }
     return result;
 }
 
@@ -194,6 +297,7 @@ static QImage fallbackRawPreview(const QString &filePath, QString *errorMessage,
 
 QImage loadRawImage(const QString &filePath, QString *errorMessage)
 {
+    const QString cacheKey = normalizedPathKey(filePath);
     QElapsedTimer timer; timer.start();
     LibRaw rawProcessor;
     int ret = rawProcessor.open_file(QFile::encodeName(filePath).constData());
@@ -335,18 +439,36 @@ unsupported_bitmap:
         qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
         return fallbackRawPreview(filePath, errorMessage, reason);
     }
+    if (!cacheKey.isEmpty()) {
+        QMutexLocker locker(&cacheMutex());
+        imageCache().insert(cacheKey, new QImage(result), imageCostKb(result));
+    }
     qDebug() << "loadRawImage execution time:" << timer.elapsed() << "ms";
     return result;
 }
 
 QImage loadImageWithRawSupport(const QString &filePath, QString *errorMessage){
+    const QString cacheKey = normalizedPathKey(filePath);
+    if (!cacheKey.isEmpty()) {
+        QMutexLocker locker(&cacheMutex());
+        if (QImage *cached = imageCache().object(cacheKey)) {
+            return *cached;
+        }
+    }
+
     if (isRawFile(filePath)) {
         return loadRawImage(filePath, errorMessage);
     }
+
     QImageReader reader(filePath);
     reader.setAutoTransform(true);
     QImage image = reader.read();
-    if (image.isNull() && errorMessage) *errorMessage = reader.errorString();
+    if (image.isNull()) {
+        if (errorMessage) *errorMessage = reader.errorString();
+    } else if (!cacheKey.isEmpty()) {
+        QMutexLocker locker(&cacheMutex());
+        imageCache().insert(cacheKey, new QImage(image), imageCostKb(image));
+    }
     return image;
 }
 
@@ -438,5 +560,63 @@ bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString
     if (metadata->lens.isEmpty())
         metadata->lens = fetchText("Exif.Photo.LensMake");
     return true;
+}
+
+void preloadAsync(const QStringList &filePaths)
+{
+    if (filePaths.isEmpty()) {
+        return;
+    }
+
+    for (const QString &path : filePaths) {
+        if (path.isEmpty()) {
+            continue;
+        }
+
+        const QString normalized = normalizedPathKey(path);
+        if (normalized.isEmpty()) {
+            continue;
+        }
+
+        bool shouldSchedule = false;
+        {
+            QMutexLocker locker(&cacheMutex());
+            if (imageCache().object(normalized)) {
+                continue;
+            }
+            if (inFlightLoads().contains(normalized)) {
+                continue;
+            }
+            inFlightLoads().insert(normalized);
+            shouldSchedule = true;
+        }
+
+        if (!shouldSchedule) {
+            continue;
+        }
+
+        const QString resolvedPath = QFileInfo(path).exists()
+            ? QFileInfo(path).absoluteFilePath()
+            : path;
+        const bool rawFile = isRawFile(resolvedPath);
+
+        [[maybe_unused]] QFuture<void> future = QtConcurrent::run(preloadThreadPool(), [normalized, resolvedPath, rawFile]() {
+            if (rawFile) {
+                loadEmbeddedRawPreview(resolvedPath, nullptr);
+            } else {
+                ImageLoader::loadImageWithRawSupport(resolvedPath, nullptr);
+            }
+            QMutexLocker locker(&cacheMutex());
+            inFlightLoads().remove(normalized);
+        });
+    }
+}
+
+void clearCaches()
+{
+    QMutexLocker locker(&cacheMutex());
+    imageCache().clear();
+    embeddedPreviewCache().clear();
+    inFlightLoads().clear();
 }
 } // namespace ImageLoader
