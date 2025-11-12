@@ -1834,7 +1834,13 @@ void MainWindow::populateDevelopMetadata(const QImage &image, const QString &fil
         ui->developMetadataResolutionValue->setText(tr("%1 x %2").arg(image.width()).arg(image.height()));
     }
     if (ui->developMetadataCaptureDateValue) {
-        const QDateTime captured = info.birthTime().isValid() ? info.birthTime() : info.lastModified();
+        QDateTime captured;
+        // Use EXIF capture date if available, otherwise fall back to file created date
+        if (metadata.captureDateTime.isValid()) {
+            captured = metadata.captureDateTime;
+        } else {
+            captured = info.birthTime().isValid() ? info.birthTime() : info.lastModified();
+        }
         ui->developMetadataCaptureDateValue->setText(locale.toString(captured, QLocale::ShortFormat));
     }
 }

@@ -5,6 +5,7 @@
 #include <QVector>
 #include <QJsonObject>
 #include <QByteArray>
+#include <QDateTime>
 
 struct HistogramData
 {
@@ -39,6 +40,7 @@ struct DevelopMetadata
     QString focusDistance;
 
     bool flashFired = false;
+    QDateTime captureDateTime;
 };
 
 struct DevelopAdjustments

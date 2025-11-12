@@ -508,6 +508,12 @@ bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString
         metadata->flash.clear();
         metadata->flashFired = false;
         metadata->focusDistance.clear();
+        
+        // Extract capture date/time from RAW file
+        if (rawProcessor.imgdata.other.timestamp > 0) {
+            metadata->captureDateTime = QDateTime::fromSecsSinceEpoch(rawProcessor.imgdata.other.timestamp);
+        }
+        
         rawProcessor.recycle();
         return true;
     }
@@ -559,6 +565,29 @@ bool extractMetadata(const QString &filePath, DevelopMetadata *metadata, QString
 
     if (metadata->lens.isEmpty())
         metadata->lens = fetchText("Exif.Photo.LensMake");
+    
+    // Extract capture date/time from EXIF
+    // Try DateTimeOriginal first (when photo was taken), then DateTime (when image was created)
+    QString dateTimeStr = fetchText("Exif.Photo.DateTimeOriginal");
+    if (dateTimeStr.isEmpty()) {
+        dateTimeStr = fetchText("Exif.Image.DateTime");
+    }
+    if (dateTimeStr.isEmpty()) {
+        dateTimeStr = fetchText("Exif.Photo.DateTimeDigitized");
+    }
+    
+    if (!dateTimeStr.isEmpty()) {
+        // EXIF date format is typically "YYYY:MM:DD HH:MM:SS"
+        QDateTime parsed = QDateTime::fromString(dateTimeStr, "yyyy:MM:dd HH:mm:ss");
+        if (!parsed.isValid()) {
+            // Try alternative formats
+            parsed = QDateTime::fromString(dateTimeStr, Qt::ISODate);
+        }
+        if (parsed.isValid()) {
+            metadata->captureDateTime = parsed;
+        }
+    }
+    
     return true;
 }
 
