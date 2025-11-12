@@ -1283,6 +1283,16 @@ void MainWindow::initializeAdjustmentControls()
                 this, &MainWindow::resetAdjustmentsToDefault);
     }
 
+    if (ui->developCopyAdjustmentsButton) {
+        connect(ui->developCopyAdjustmentsButton, &QPushButton::clicked,
+                this, &MainWindow::on_actionCopy_triggered);
+    }
+
+    if (ui->developPasteAdjustmentsButton) {
+        connect(ui->developPasteAdjustmentsButton, &QPushButton::clicked,
+                this, &MainWindow::on_actionPaste_triggered);
+    }
+
     syncAdjustmentControls(m_currentAdjustments);
 }
 
@@ -1320,15 +1330,20 @@ bool MainWindow::adjustmentsAreIdentity(const DevelopAdjustments &adjustments) c
            almostEqual(adjustments.grain, 0.0);
 }
 
-void MainWindow::requestAdjustmentRender(bool forceImmediate)
+void MainWindow::requestAdjustmentRender(bool forceImmediate, bool skipCancel)
 {
     if (!m_adjustmentEngine || m_currentDevelopAssetId < 0 || m_currentDevelopOriginalImage.isNull()) {
+        qDebug() << "requestAdjustmentRender: Cannot render - engine:" << (m_adjustmentEngine != nullptr)
+                 << "assetId:" << m_currentDevelopAssetId << "image null:" << m_currentDevelopOriginalImage.isNull();
         return;
     }
 
     const bool identity = adjustmentsAreIdentity(m_currentAdjustments);
     if (identity) {
-        m_adjustmentEngine->cancelActive();
+        qDebug() << "requestAdjustmentRender: Adjustments are identity, using original image";
+        if (!skipCancel) {
+            m_adjustmentEngine->cancelActive();
+        }
         m_fullRenderTimer.stop();
         m_currentDevelopAdjustedImage = m_currentDevelopOriginalImage;
         m_currentDevelopAdjustedValid = true;
@@ -1336,6 +1351,7 @@ void MainWindow::requestAdjustmentRender(bool forceImmediate)
         return;
     }
 
+    qDebug() << "requestAdjustmentRender: Starting render, forceImmediate:" << forceImmediate << "skipCancel:" << skipCancel;
     m_currentDevelopAdjustedValid = false;
     m_currentDevelopAdjustedImage = QImage();
 
@@ -1343,7 +1359,7 @@ void MainWindow::requestAdjustmentRender(bool forceImmediate)
 
     if (forceImmediate) {
         m_previewRenderEnabled = false;
-        startFullRender();
+        startFullRender(skipCancel);
         return;
     }
 
@@ -1360,11 +1376,13 @@ void MainWindow::requestAdjustmentRender(bool forceImmediate)
 void MainWindow::handleAdjustmentRenderResult(const DevelopAdjustmentRenderResult &result)
 {
     if (result.cancelled || result.image.isNull()) {
+        qDebug() << "Render result cancelled or null, requestId:" << result.requestId;
         return;
     }
 
     if (result.isPreview) {
         if (result.requestId != m_latestPreviewRequestId) {
+            qDebug() << "Preview render ID mismatch:" << result.requestId << "vs" << m_latestPreviewRequestId;
             return;
         }
         applyDevelopImage(result.image, false, true, result.displayScale);
@@ -1372,9 +1390,11 @@ void MainWindow::handleAdjustmentRenderResult(const DevelopAdjustmentRenderResul
     }
 
     if (result.requestId != m_latestFullRequestId) {
+        qDebug() << "Full render ID mismatch:" << result.requestId << "vs" << m_latestFullRequestId;
         return;
     }
 
+    qDebug() << "Applying render result to viewport, requestId:" << result.requestId;
     m_currentDevelopAdjustedImage = result.image;
     m_currentDevelopAdjustedValid = true;
     applyDevelopImage(result.image, true, false, 1.0);
@@ -1416,13 +1436,17 @@ void MainWindow::startPreviewRender()
     watcher->setFuture(future);
 }
 
-void MainWindow::startFullRender()
+void MainWindow::startFullRender(bool skipCancel)
 {
     if (!m_adjustmentEngine || m_currentDevelopOriginalImage.isNull()) {
         return;
     }
 
-    m_adjustmentEngine->cancelActive();
+    // Cancel any previous active renders before starting a new one
+    // Skip if we already cancelled (e.g., when pasting)
+    if (!skipCancel) {
+        m_adjustmentEngine->cancelActive();
+    }
 
     DevelopAdjustmentRequest request;
     request.requestId = ++m_nextAdjustmentRequestId;
@@ -1432,10 +1456,14 @@ void MainWindow::startFullRender()
     request.displayScale = 1.0;
     m_latestFullRequestId = request.requestId;
 
+    qDebug() << "startFullRender: Starting render with requestId:" << request.requestId;
+
     auto future = m_adjustmentEngine->renderAsync(std::move(request));
     auto *watcher = new QFutureWatcher<DevelopAdjustmentRenderResult>(this);
-    connect(watcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished, this, [this, watcher]() {
+    connect(watcher, &QFutureWatcher<DevelopAdjustmentRenderResult>::finished, this, [this, watcher, expectedId = request.requestId]() {
         DevelopAdjustmentRenderResult result = watcher->result();
+        qDebug() << "startFullRender: Render finished, requestId:" << result.requestId << "expected:" << expectedId
+                 << "cancelled:" << result.cancelled << "image null:" << result.image.isNull();
         watcher->deleteLater();
         handleAdjustmentRenderResult(result);
     });
@@ -1500,14 +1528,18 @@ void MainWindow::applyDevelopImage(const QImage &image,
                                    double displayScale)
 {
     if (!m_developScene || !m_developPixmapItem || image.isNull()) {
+        qDebug() << "applyDevelopImage: Cannot apply - scene:" << (m_developScene != nullptr)
+                 << "pixmapItem:" << (m_developPixmapItem != nullptr) << "image null:" << image.isNull();
         return;
     }
 
     const QPixmap pixmap = QPixmap::fromImage(image);
     if (pixmap.isNull()) {
+        qDebug() << "applyDevelopImage: Failed to create pixmap from image";
         return;
     }
 
+    qDebug() << "applyDevelopImage: Applying image to viewport, size:" << image.size() << "isPreview:" << isPreview;
     m_developPixmapItem->setPixmap(pixmap);
     m_developPixmapItem->setVisible(true);
     if (isPreview && !qFuzzyCompare(displayScale, 1.0)) {
@@ -1519,6 +1551,12 @@ void MainWindow::applyDevelopImage(const QImage &image,
         m_developScene->setSceneRect(pixmap.rect());
         m_developPixmapItem->setScale(1.0);
     }
+
+    // Force viewport update to refresh the display
+    if (ui->developImageView) {
+        ui->developImageView->viewport()->update();
+    }
+    m_developScene->update();
 
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
@@ -1670,6 +1708,115 @@ void MainWindow::resetAdjustmentsToDefault()
     showStatusMessage(tr("Adjustments reset"), 2000);
 }
 
+void MainWindow::processNextPreviewRegeneration()
+{
+    if (m_pendingPreviewRegenerations.isEmpty()) {
+        // All done - complete the job
+        if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+            m_jobManager->completeJob(m_pastePreviewJobId, tr("All previews updated"));
+            m_pastePreviewJobId = {};
+            m_pastePreviewCompleted = 0;
+            m_pastePreviewTotal = 0;
+        }
+        return;
+    }
+
+    qint64 assetId = m_pendingPreviewRegenerations.takeFirst();
+    const LibraryAsset *asset = assetById(assetId);
+    if (!asset) {
+        // Skip to next
+        m_pastePreviewCompleted++;
+        if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+            m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+        }
+        QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+        return;
+    }
+
+    const QString originalPath = assetOriginalPath(*asset);
+    if (originalPath.isEmpty()) {
+        // Skip to next
+        m_pastePreviewCompleted++;
+        if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+            m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+        }
+        QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+        return;
+    }
+
+    // Update job detail with current file
+    if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+        m_jobManager->updateDetail(m_pastePreviewJobId, tr("Processing %1 (%2 of %3)")
+                                   .arg(asset->fileName)
+                                   .arg(m_pastePreviewCompleted + 1)
+                                   .arg(m_pastePreviewTotal));
+    }
+
+    // Process this image asynchronously, then move to next
+    QtConcurrent::run([this, assetId, originalPath, fileName = asset->fileName]() {
+        QString loadError;
+        QImage originalImage = ImageLoader::loadImageWithRawSupport(originalPath, &loadError);
+        if (originalImage.isNull()) {
+            // Move to next
+            QMetaObject::invokeMethod(this, [this]() {
+                m_pastePreviewCompleted++;
+                if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+                    m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+                }
+                QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // Apply adjustments to generate preview
+        if (!adjustmentsAreIdentity(m_copiedAdjustments)) {
+            DevelopAdjustmentRequest request;
+            request.requestId = 0;
+            request.image = originalImage;
+            request.adjustments = m_copiedAdjustments;
+            request.isPreview = false;
+            request.displayScale = 1.0;
+
+            QFuture<DevelopAdjustmentRenderResult> renderFuture = m_adjustmentEngine->renderAsync(std::move(request));
+            renderFuture.waitForFinished();
+            const DevelopAdjustmentRenderResult result = renderFuture.result();
+            if (!result.cancelled && !result.image.isNull()) {
+                QMetaObject::invokeMethod(this, [this, assetId, result]() {
+                    schedulePreviewRegeneration(assetId, result.image, m_pastePreviewJobId, [this]() {
+                        // Preview saved - update progress and move to next
+                        m_pastePreviewCompleted++;
+                        if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+                            m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+                        }
+                        QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+                    });
+                }, Qt::QueuedConnection);
+            } else {
+                // Move to next on failure
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_pastePreviewCompleted++;
+                    if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+                        m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+                    }
+                    QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+                }, Qt::QueuedConnection);
+            }
+        } else {
+            // No adjustments, just use original
+            QMetaObject::invokeMethod(this, [this, assetId, originalImage]() {
+                schedulePreviewRegeneration(assetId, originalImage, m_pastePreviewJobId, [this]() {
+                    // Preview saved - update progress and move to next
+                    m_pastePreviewCompleted++;
+                    if (m_jobManager && !m_pastePreviewJobId.isNull()) {
+                        m_jobManager->updateProgress(m_pastePreviewJobId, m_pastePreviewCompleted, m_pastePreviewTotal);
+                    }
+                    QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+                });
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
 void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPath)
 {
     if (!m_libraryGridView) {
@@ -1713,7 +1860,7 @@ void MainWindow::updateThumbnailPreview(qint64 assetId, const QString &previewPa
     }
 }
 
-void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage)
+void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage, const QUuid &parentJobId, std::function<void()> onComplete)
 {
     if (!m_libraryManager || sourceImage.isNull()) {
         return;
@@ -1742,9 +1889,10 @@ void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourc
         return;
     }
 
-    QString jobDetail = QFileInfo(previewPath).fileName();
+    // Only create a job if not part of a parent job (e.g., paste operation)
     QUuid jobId;
-    if (m_jobManager) {
+    if (m_jobManager && parentJobId.isNull()) {
+        QString jobDetail = QFileInfo(previewPath).fileName();
         jobId = m_jobManager->startJob(JobCategory::PreviewGeneration,
                                        tr("Updating preview"),
                                        jobDetail);
@@ -1755,7 +1903,8 @@ void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourc
                                                                       assetId,
                                                                       previewPath,
                                                                       previewImage,
-                                                                      jobId]() {
+                                                                      jobId,
+                                                                      onComplete]() {
         bool success = false;
         QString errorMessage;
 
@@ -1769,7 +1918,8 @@ void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourc
             }
         }
 
-        QMetaObject::invokeMethod(this, [this, assetId, previewPath, success, errorMessage, jobId]() {
+        QMetaObject::invokeMethod(this, [this, assetId, previewPath, success, errorMessage, jobId, onComplete]() {
+            // Only complete/fail job if it's a standalone job (not part of paste operation)
             if (m_jobManager && !jobId.isNull()) {
                 if (success) {
                     m_jobManager->completeJob(jobId, tr("Preview updated"));
@@ -1785,6 +1935,11 @@ void MainWindow::schedulePreviewRegeneration(qint64 assetId, const QImage &sourc
             if (success) {
                 updateThumbnailPreview(assetId, previewPath);
                 qDebug() << "Updated Thumbnail";
+            }
+            
+            // Call completion callback if provided
+            if (onComplete) {
+                onComplete();
             }
         }, Qt::QueuedConnection);
     });
@@ -2311,10 +2466,143 @@ void MainWindow::on_actionCut_triggered(){
     qDebug() << "Cut clicked!";
 }
 void MainWindow::on_actionCopy_triggered(){
-    qDebug() << "Copy clicked!";
+    if (m_currentDevelopAssetId < 0) {
+        showStatusMessage(tr("No image selected to copy adjustments from"), 2000);
+        return;
+    }
+
+    m_copiedAdjustments = m_currentAdjustments;
+    m_hasCopiedAdjustments = true;
+
+    const LibraryAsset *asset = assetById(m_currentDevelopAssetId);
+    QString fileName = asset ? asset->fileName : tr("image");
+    showStatusMessage(tr("Copied adjustments from %1").arg(fileName), 3000);
 }
 void MainWindow::on_actionPaste_triggered(){
-    qDebug() << "Paste clicked!";
+    if (!m_hasCopiedAdjustments) {
+        showStatusMessage(tr("No adjustments copied. Copy adjustments from an image first."), 3000);
+        return;
+    }
+
+    QList<qint64> selectedIds;
+    
+    // Check which page is currently active
+    bool isDevelopPage = false;
+    if (ui->stackedWidget) {
+        isDevelopPage = (ui->stackedWidget->currentWidget() == ui->developPage);
+    }
+
+    // If on Develop page and have a current image, paste to that image only
+    if (isDevelopPage && m_currentDevelopAssetId >= 0) {
+        selectedIds.append(m_currentDevelopAssetId);
+        qDebug() << "Pasting to current Develop image:" << m_currentDevelopAssetId;
+    } else {
+        // Otherwise, paste to all selected images in library
+        if (m_libraryGridView) {
+            selectedIds = m_libraryGridView->selectedAssetIds();
+        }
+        
+        if (selectedIds.isEmpty()) {
+            showStatusMessage(tr("No images selected. Select images in the library or open an image in Develop."), 3000);
+            return;
+        }
+        qDebug() << "Pasting to" << selectedIds.size() << "selected library image(s)";
+    }
+
+    int successCount = 0;
+    int failCount = 0;
+    QList<qint64> successfulIds;
+    bool pastedToCurrentImage = false;
+
+    qDebug() << "Pasting adjustments to" << selectedIds.size() << "image(s)";
+
+    for (qint64 assetId : selectedIds) {
+        QString error;
+        if (m_libraryManager && m_libraryManager->saveDevelopAdjustments(assetId, m_copiedAdjustments, &error)) {
+            successCount++;
+            successfulIds.append(assetId);
+            qDebug() << "Successfully pasted adjustments to asset" << assetId;
+            if (assetId == m_currentDevelopAssetId) {
+                pastedToCurrentImage = true;
+            }
+        } else {
+            failCount++;
+            qWarning() << "Failed to paste adjustments to asset" << assetId << ":" << error;
+        }
+    }
+
+    qDebug() << "Paste complete: successCount=" << successCount << "failCount=" << failCount;
+
+    // If pasting to current image, directly set adjustments and re-render
+    if (pastedToCurrentImage && m_currentDevelopAssetId >= 0) {
+        // Directly set the adjustments instead of reloading from database
+        m_currentAdjustments = m_copiedAdjustments;
+        syncAdjustmentControls(m_currentAdjustments);
+        m_savingAdjustmentsPending = false;
+        // Clear any pending adjustment persist timer since we just saved
+        m_adjustmentPersistTimer.stop();
+        
+        // Stop timer
+        m_fullRenderTimer.stop();
+        
+        // Clear cached adjusted image to force fresh render
+        m_currentDevelopAdjustedImage = QImage();
+        m_currentDevelopAdjustedValid = false;
+        m_currentDevelopPreviewImage = QImage();
+        m_currentDevelopPreviewScale = 1.0;
+        m_previewRenderEnabled = false;
+        
+        // Force immediate render with the already-loaded original image
+        // This applies adjustments without reloading from disk
+        // Use QTimer to ensure any pending operations complete before starting render
+        if (!m_currentDevelopOriginalImage.isNull()) {
+            qDebug() << "Pasting: Scheduling render for current image, assetId:" << m_currentDevelopAssetId;
+            // Use a small delay to ensure cancellation completes and state is clean
+            QTimer::singleShot(10, this, [this]() {
+                qDebug() << "Pasting: Starting render after delay";
+                requestAdjustmentRender(true, false);
+            });
+        } else {
+            qWarning() << "Pasting: Cannot render - original image is null";
+        }
+    }
+
+    // Trigger preview regeneration for all successfully pasted images
+    // Process sequentially to avoid loading all images at once
+    if (successCount > 0 && m_adjustmentEngine && !successfulIds.isEmpty()) {
+        // Create a single job to track all preview regenerations
+        if (m_jobManager) {
+            m_pastePreviewJobId = m_jobManager->startJob(JobCategory::PreviewGeneration,
+                                                         tr("Updating previews"),
+                                                         tr("Regenerating %1 preview(s)").arg(successfulIds.size()));
+            m_pastePreviewTotal = successfulIds.size();
+            m_pastePreviewCompleted = 0;
+            m_jobManager->updateProgress(m_pastePreviewJobId, 0, m_pastePreviewTotal);
+        }
+        
+        // Store the list and process one at a time
+        m_pendingPreviewRegenerations = successfulIds;
+        
+        // Start processing the first image
+        QTimer::singleShot(0, this, &MainWindow::processNextPreviewRegeneration);
+    }
+
+    // Refresh library view to show updated previews
+    if (successCount > 0 && m_libraryGridView) {
+        m_libraryGridView->viewport()->update();
+    }
+
+    if (successCount > 0 && failCount == 0) {
+        if (successCount == 1) {
+            showStatusMessage(tr("Pasted adjustments to 1 image"), 3000);
+        } else {
+            showStatusMessage(tr("Pasted adjustments to %1 images").arg(successCount), 3000);
+        }
+    } else if (successCount > 0 && failCount > 0) {
+        showStatusMessage(tr("Pasted to %1 image(s), %2 failed").arg(successCount).arg(failCount), 4000);
+    } else {
+        showStatusMessage(tr("Failed to paste adjustments"), 3000);
+    }
 }
 
 void MainWindow::on_actionSelect_All_triggered(){

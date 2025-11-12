@@ -144,6 +144,26 @@
            </widget>
           </item>
           <item>
+           <widget class="QPushButton" name="developCopyAdjustmentsButton">
+            <property name="text">
+             <string>Copy Adjustments</string>
+            </property>
+            <property name="toolTip">
+             <string>Copy adjustments from current image (Ctrl+C)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="developPasteAdjustmentsButton">
+            <property name="text">
+             <string>Paste Adjustments</string>
+            </property>
+            <property name="toolTip">
+             <string>Paste adjustments to selected images (Ctrl+V)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
            <widget class="QPushButton" name="developResetAdjustmentsButton">
             <property name="text">
              <string>Reset</string>

@@ -128,7 +128,7 @@ private:
     void requestHistogramComputation(const QImage &image, int requestId);
     void setupJobSystem();
     void updateJobsActionBadge();
-    void schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage);
+    void schedulePreviewRegeneration(qint64 assetId, const QImage &sourceImage, const QUuid &parentJobId = {}, std::function<void()> onComplete = nullptr);
     void resetHistogram();
     void selectFilmstripItem(qint64 assetId);
     void setupAdjustmentEngine();
@@ -140,10 +140,10 @@ private:
                                const std::function<double(int)> &sliderToValue,
                                const std::function<int(double)> &valueToSlider);
     void handleAdjustmentChanged();
-    void requestAdjustmentRender(bool forceImmediate = false);
+    void requestAdjustmentRender(bool forceImmediate = false, bool skipCancel = false);
     void handleAdjustmentRenderResult(const DevelopAdjustmentRenderResult &result);
     void startPreviewRender();
-    void startFullRender();
+    void startFullRender(bool skipCancel = false);
     bool shouldUsePreviewRender() const;
     void ensurePreviewImageReady();
     bool adjustmentsAreIdentity(const DevelopAdjustments &adjustments) const;
@@ -156,6 +156,7 @@ private:
     void scheduleAdjustmentPersist();
     void loadAdjustmentsForAsset(qint64 assetId);
     void resetAdjustmentsToDefault();
+    void processNextPreviewRegeneration();
 
     LibraryManager *m_libraryManager = nullptr;
     JobManager *m_jobManager = nullptr;
@@ -187,6 +188,13 @@ private:
     bool m_previewRenderEnabled = false;
     bool m_savingAdjustmentsPending = false;
     QTimer m_adjustmentPersistTimer;
+
+    DevelopAdjustments m_copiedAdjustments;
+    bool m_hasCopiedAdjustments = false;
+    QList<qint64> m_pendingPreviewRegenerations;
+    QUuid m_pastePreviewJobId;
+    int m_pastePreviewCompleted = 0;
+    int m_pastePreviewTotal = 0;
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

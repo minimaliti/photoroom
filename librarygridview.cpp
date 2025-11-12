@@ -126,21 +126,32 @@ void LibraryGridView::updateItemPreview(qint64 assetId, const QString &previewPa
 
     Item &item = m_items[index];
     const QString previousPath = item.previewPath;
-    if (previousPath != previewPath) {
-        if (!previousPath.isEmpty()) {
-            const QString key = cacheKeyForPath(previousPath);
-            if (!key.isEmpty()) {
-                QMutexLocker locker(&previewCacheMutex());
-                previewCache().remove(key);
-            }
+    
+    // Clear cache for both old and new paths to ensure fresh load
+    if (!previousPath.isEmpty()) {
+        const QString key = cacheKeyForPath(previousPath);
+        if (!key.isEmpty()) {
+            QMutexLocker locker(&previewCacheMutex());
+            previewCache().remove(key);
         }
     }
+    
+    // Also clear cache for new path to force reload
+    if (!previewPath.isEmpty()) {
+        const QString key = cacheKeyForPath(previewPath);
+        if (!key.isEmpty()) {
+            QMutexLocker locker(&previewCacheMutex());
+            previewCache().remove(key);
+        }
+    }
+    
     item.previewPath = previewPath;
     item.pixmap = QPixmap();
     item.pixmapLoaded = false;
     cancelPendingLoad(index);
 
-    viewport()->update(itemRect(index, verticalScrollBar()->value()));
+    // Force update the entire viewport to ensure refresh
+    viewport()->update();
 }
 
 QList<qint64> LibraryGridView::selectedAssetIds() const
