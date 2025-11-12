@@ -2136,7 +2136,6 @@ void MainWindow::handleDevelopImageLoaded()
         m_currentDevelopAdjustedValid = true;
         applyDevelopImage(result.image, true, false, 1.0);
     } else {
-        applyDevelopImage(result.image, false, false, 1.0);
         requestAdjustmentRender(true);
     }
 
