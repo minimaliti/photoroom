@@ -1378,6 +1378,11 @@ void MainWindow::handleAdjustmentRenderResult(const DevelopAdjustmentRenderResul
     m_currentDevelopAdjustedImage = result.image;
     m_currentDevelopAdjustedValid = true;
     applyDevelopImage(result.image, true, false, 1.0);
+
+    // Update thumbnail with adjusted image
+    if (m_currentDevelopAssetId >= 0) {
+        schedulePreviewRegeneration(m_currentDevelopAssetId, result.image);
+    }
 }
 
 void MainWindow::startPreviewRender()
@@ -2135,15 +2140,13 @@ void MainWindow::handleDevelopImageLoaded()
         m_currentDevelopAdjustedImage = result.image;
         m_currentDevelopAdjustedValid = true;
         applyDevelopImage(result.image, true, false, 1.0);
+        // Update thumbnail with original image (no adjustments)
+        schedulePreviewRegeneration(result.assetId, result.image);
     } else {
         requestAdjustmentRender(true);
     }
 
     populateDevelopMetadata(result.image, result.filePath, result.metadata);
-
-    if (ImageLoader::isRawFile(result.filePath) && identityAdjustments) {
-        schedulePreviewRegeneration(result.assetId, result.image);
-    }
 
     if (m_jobManager && !m_activeDevelopJobId.isNull()) {
         m_jobManager->completeJob(m_activeDevelopJobId, tr("Ready for Develop"));
