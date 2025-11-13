@@ -1178,7 +1178,7 @@ void MainWindow::initializeAdjustmentControls()
                                 handleAdjustmentChanged();
                             }
                         },
-                        10.0);
+                        100.0);
 
     const auto identityGetter = [this](double DevelopAdjustments::*member) {
         return [this, member]() {
@@ -1640,7 +1640,7 @@ void MainWindow::syncAdjustmentControls(const DevelopAdjustments &adjustments)
         }
     };
 
-    setSliderSpin(ui->exposureSlider, ui->exposureSpinBox, adjustments.exposure, 10.0);
+    setSliderSpin(ui->exposureSlider, ui->exposureSpinBox, adjustments.exposure, 100.0);
     setSliderSpin(ui->contrastSlider, ui->contrastSpinBox, adjustments.contrast, 1.0);
     setSliderSpin(ui->highlightsSlider, ui->highlightsSpinBox, adjustments.highlights, 1.0);
     setSliderSpin(ui->shadowsSlider, ui->shadowsSpinBox, adjustments.shadows, 1.0);

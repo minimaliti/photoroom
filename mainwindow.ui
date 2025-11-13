@@ -550,10 +550,10 @@
                  <item row="0" column="1">
                   <widget class="QSlider" name="exposureSlider">
                    <property name="minimum">
-                    <number>-50</number>
+                    <number>-600</number>
                    </property>
                    <property name="maximum">
-                    <number>50</number>
+                    <number>600</number>
                    </property>
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
@@ -566,10 +566,13 @@
                     <number>2</number>
                    </property>
                    <property name="minimum">
-                    <double>-5.000000000000000</double>
+                    <double>-6.000000000000000</double>
                    </property>
                    <property name="maximum">
-                    <double>5.000000000000000</double>
+                    <double>6.000000000000000</double>
+                   </property>
+                   <property name="suffix">
+                    <string> EV</string>
                    </property>
                   </widget>
                  </item>
