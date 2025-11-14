@@ -5,7 +5,6 @@
 
 #include <QGraphicsPixmapItem>
 #include <QFutureWatcher>
-#include <QGraphicsBlurEffect>
 #include <QGraphicsScene>
 #include <QImage>
 #include <QList>
@@ -91,7 +90,6 @@ private:
     Ui::MainWindow *ui;
     QGraphicsScene *m_developScene = nullptr;
     QGraphicsPixmapItem *m_developPixmapItem = nullptr;
-    QGraphicsBlurEffect *m_developBlurEffect = nullptr;
     LibraryGridView *m_libraryGridView = nullptr;
     HistogramWidget *m_histogramWidget = nullptr;
 

@@ -494,11 +494,6 @@ void MainWindow::ensureDevelopViewInitialized()
     m_developPixmapItem = m_developScene->addPixmap(QPixmap());
     m_developPixmapItem->setVisible(false);
 
-    m_developBlurEffect = new QGraphicsBlurEffect(this);
-    m_developBlurEffect->setBlurRadius(18.0);
-    m_developBlurEffect->setEnabled(false);
-    m_developPixmapItem->setGraphicsEffect(m_developBlurEffect);
-
     initializeDevelopHistogram();
 }
 
@@ -600,9 +595,6 @@ void MainWindow::clearDevelopView()
         ui->developZoomCombo->setCurrentIndex(0);
     }
     resetHistogram();
-    if (m_developBlurEffect) {
-        m_developBlurEffect->setEnabled(false);
-    }
 }
 
 void MainWindow::resetHistogram()
@@ -666,10 +658,6 @@ void MainWindow::showDevelopPreview(const QPixmap &pixmap)
     m_developPixmapItem->setPixmap(pixmap);
     m_developPixmapItem->setVisible(true);
     m_developScene->setSceneRect(pixmap.rect());
-
-    if (m_developBlurEffect) {
-        m_developBlurEffect->setEnabled(true);
-    }
 
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
@@ -1568,10 +1556,6 @@ void MainWindow::applyDevelopImage(const QImage &image,
     }
     if (ui->stackedWidget && ui->developPage) {
         ui->stackedWidget->setCurrentWidget(ui->developPage);
-    }
-
-    if (m_developBlurEffect) {
-        m_developBlurEffect->setEnabled(false);
     }
 
     if (m_developFitMode) {
