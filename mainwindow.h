@@ -85,6 +85,7 @@ private slots:
     void handleImportCompleted();
     void handleLibraryError(const QString &message);
     void handleJobListChanged();
+    void handleFolderDropped(const QString &folderPath);
 
 private:
     Ui::MainWindow *ui;

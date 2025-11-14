@@ -13,6 +13,11 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QtConcurrent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -64,6 +69,7 @@ LibraryGridView::LibraryGridView(QWidget *parent)
     setMouseTracking(false);
     setFocusPolicy(Qt::StrongFocus);
     viewport()->setAutoFillBackground(false);
+    setAcceptDrops(true);
 }
 
 LibraryGridView::~LibraryGridView()
@@ -621,6 +627,41 @@ void LibraryGridView::setSelectionRange(int start, int end)
 void LibraryGridView::emitSelectionChanged()
 {
     emit selectionChanged(selectedAssetIds());
+}
+
+void LibraryGridView::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void LibraryGridView::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void LibraryGridView::dropEvent(QDropEvent *event)
+{
+    if (!event->mimeData()->hasUrls()) {
+        return;
+    }
+
+    const QList<QUrl> urls = event->mimeData()->urls();
+    for (const QUrl &url : urls) {
+        if (!url.isLocalFile()) {
+            continue;
+        }
+        const QString localPath = url.toLocalFile();
+        QFileInfo info(localPath);
+        if (info.isDir()) {
+            emit folderDropped(localPath);
+            event->acceptProposedAction();
+            return;
+        }
+    }
 }
 
 

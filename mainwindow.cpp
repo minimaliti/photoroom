@@ -6,6 +6,8 @@
 #include "jobmanager.h"
 #include "jobswindow.h"
 #include "exportdialog.h"
+#include "importpreviewdialog.h"
+#include "imageloader.h"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -14,6 +16,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGraphicsBlurEffect>
@@ -366,6 +369,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::openAssetInDevelop);
     connect(m_libraryGridView, &LibraryGridView::selectionChanged,
             this, &MainWindow::handleSelectionChanged);
+    connect(m_libraryGridView, &LibraryGridView::folderDropped,
+            this, &MainWindow::handleFolderDropped);
 
     if (ui->libraryGridLayout) {
         ui->libraryGridLayout->addWidget(m_libraryGridView);
@@ -3000,4 +3005,77 @@ void MainWindow::on_actionImport_triggered()
     }
 
     m_libraryManager->importFiles(files);
+}
+
+namespace {
+QStringList findPhotoFilesRecursively(const QString &folderPath)
+{
+    QStringList result;
+    QDir dir(folderPath);
+    if (!dir.exists()) {
+        return result;
+    }
+
+    // Get supported extensions from ImageLoader
+    QStringList nameFilters = ImageLoader::supportedNameFilters();
+    
+    // Recursively find all files matching the filters
+    QDirIterator it(folderPath, nameFilters, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        result.append(it.next());
+    }
+
+    return result;
+}
+}
+
+void MainWindow::handleFolderDropped(const QString &folderPath)
+{
+    if (!m_libraryManager || !m_libraryManager->hasOpenLibrary()) {
+        QMessageBox::information(this,
+                                 tr("No open library"),
+                                 tr("Open a library before importing files."));
+        return;
+    }
+
+    // Recursively find all photo files in the folder
+    QStringList files = findPhotoFilesRecursively(folderPath);
+    
+    if (files.isEmpty()) {
+        QMessageBox::information(this,
+                                tr("No photos found"),
+                                tr("No supported photo files were found in the selected folder."));
+        return;
+    }
+
+    // Show preview dialog
+    ImportPreviewDialog dialog(files, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QStringList filesToImport = dialog.selectedFiles();
+    if (filesToImport.isEmpty()) {
+        return;
+    }
+
+    // Start import job
+    if (m_jobManager) {
+        if (m_importJobActive && !m_activeImportJobId.isNull()) {
+            m_jobManager->cancelJob(m_activeImportJobId, tr("Import superseded"));
+        }
+        const QString detail = tr("%1 items").arg(filesToImport.size());
+        m_activeImportJobId = m_jobManager->startJob(JobCategory::Import,
+                                                     tr("Importing photos"),
+                                                     detail);
+        if (filesToImport.size() > 0) {
+            m_jobManager->updateProgress(m_activeImportJobId, 0, filesToImport.size());
+        } else {
+            m_jobManager->setIndeterminate(m_activeImportJobId, true);
+        }
+        m_importJobActive = true;
+        m_activeImportTotal = filesToImport.size();
+    }
+
+    m_libraryManager->importFiles(filesToImport);
 }

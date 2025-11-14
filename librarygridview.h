@@ -35,12 +35,16 @@ public:
 signals:
     void selectionChanged(const QList<qint64> &selectedAssetIds);
     void assetActivated(qint64 assetId, const QString &originalPath);
+    void folderDropped(const QString &folderPath);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private:
     struct Item

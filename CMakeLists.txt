@@ -46,6 +46,8 @@ set(PROJECT_SOURCES
     developadjustmentengine.h
     developtypes.cpp
     developtypes.h
+    importpreviewdialog.cpp
+    importpreviewdialog.h
 )
 
 # Create the executable using the list of sources.
