@@ -230,6 +230,8 @@ QString jobCategoryToDisplayText(JobCategory category)
         return QObject::tr("Import");
     case JobCategory::PreviewGeneration:
         return QObject::tr("Preview");
+    case JobCategory::MetadataExtraction:
+        return QObject::tr("Metadata");
     case JobCategory::Develop:
         return QObject::tr("Develop");
     case JobCategory::Histogram:

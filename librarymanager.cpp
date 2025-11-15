@@ -3,6 +3,7 @@
 #include "imageloader.h"
 #include "previewgenerator.h"
 #include "jobmanager.h"
+#include "metadatacache.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -12,6 +13,8 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
+#include <QtConcurrent>
+#include <QFutureWatcher>
 
 namespace {
 constexpr auto kDatabaseFileName = "library.db";
@@ -39,6 +42,7 @@ int bucketIndexForPhotoNumber(const QString &photoNumber)
 LibraryManager::LibraryManager(QObject *parent)
     : QObject(parent)
     , m_previewGenerator(new PreviewGenerator(this))
+    , m_metadataCache(new MetadataCache(this))
 {
     connect(m_previewGenerator, &PreviewGenerator::previewReady, this, [this](const PreviewResult &result) {
         if (!hasOpenLibrary()) {
@@ -47,14 +51,23 @@ LibraryManager::LibraryManager(QObject *parent)
 
         const QUuid jobId = m_previewJobIds.take(result.assetId);
         if (!result.success) {
-            if (m_jobManager && !jobId.isNull()) {
+            // Update batch progress even on failure
+            m_previewGenerationCompleted++;
+            updateBatchPreviewProgress();
+            if (m_jobManager && !jobId.isNull() && m_batchPreviewJobId.isNull()) {
+                // Only fail individual job if not using batch job
                 m_jobManager->failJob(jobId, result.errorMessage);
             }
             emit errorOccurred(result.errorMessage);
             return;
         }
 
-        if (m_jobManager && !jobId.isNull()) {
+        // Update batch progress
+        m_previewGenerationCompleted++;
+        updateBatchPreviewProgress();
+        
+        // Only complete individual job if not using batch job
+        if (m_jobManager && !jobId.isNull() && m_batchPreviewJobId.isNull()) {
             m_jobManager->completeJob(jobId, tr("Preview generated"));
         }
 
@@ -136,6 +149,15 @@ bool LibraryManager::createLibrary(const QString &directoryPath, QString *errorM
 
     ensurePhotoNumberSupport();
 
+    // Open metadata cache
+    if (m_metadataCache) {
+        QString cacheError;
+        if (!m_metadataCache->openCache(directoryPath, &cacheError)) {
+            qWarning() << "Failed to open metadata cache:" << cacheError;
+            // Don't fail library creation if cache fails
+        }
+    }
+
     emit libraryOpened(m_libraryPath);
     emit assetsChanged();
     return true;
@@ -197,6 +219,15 @@ bool LibraryManager::openLibrary(const QString &directoryPath, QString *errorMes
 
     ensurePhotoNumberSupport();
 
+    // Open metadata cache
+    if (m_metadataCache) {
+        QString cacheError;
+        if (!m_metadataCache->openCache(directoryPath, &cacheError)) {
+            qWarning() << "Failed to open metadata cache:" << cacheError;
+            // Don't fail library opening if cache fails
+        }
+    }
+
     emit libraryOpened(m_libraryPath);
     emit assetsChanged();
     return true;
@@ -210,8 +241,44 @@ void LibraryManager::closeLibrary()
                 m_jobManager->cancelJob(jobId, tr("Library closed"));
             }
         }
+        for (const QUuid &jobId : std::as_const(m_metadataJobIds)) {
+            if (!jobId.isNull()) {
+                m_jobManager->cancelJob(jobId, tr("Library closed"));
+            }
+        }
     }
     m_previewJobIds.clear();
+    m_metadataJobIds.clear();
+    
+    // Cancel batch preview job
+    if (m_jobManager && !m_batchPreviewJobId.isNull()) {
+        m_jobManager->cancelJob(m_batchPreviewJobId, tr("Library closed"));
+        m_batchPreviewJobId = QUuid();
+    }
+    m_previewGenerationTotal = 0;
+    m_previewGenerationCompleted = 0;
+    
+    // Cancel batch metadata job
+    if (m_jobManager && !m_batchMetadataJobId.isNull()) {
+        m_jobManager->cancelJob(m_batchMetadataJobId, tr("Library closed"));
+        m_batchMetadataJobId = QUuid();
+    }
+    m_metadataExtractionTotal = 0;
+    m_metadataExtractionCompleted = 0;
+
+    // Cancel pending metadata extractions
+    for (QFutureWatcher<AssetMetadata> *watcher : m_metadataExtractionWatchers) {
+        if (watcher) {
+            watcher->cancel();
+            watcher->waitForFinished();
+            watcher->deleteLater();
+        }
+    }
+    m_metadataExtractionWatchers.clear();
+
+    if (m_metadataCache) {
+        m_metadataCache->closeCache();
+    }
 
     if (!m_connectionName.isEmpty()) {
         if (m_database.isOpen()) {
@@ -232,21 +299,146 @@ void LibraryManager::setJobManager(JobManager *jobManager)
 
 QVector<LibraryAsset> LibraryManager::assets() const
 {
+    FilterOptions defaultOptions;
+    defaultOptions.sortOrder = FilterOptions::SortByDateDesc;
+    return assets(defaultOptions);
+}
+
+QVector<LibraryAsset> LibraryManager::assets(const FilterOptions &filterOptions) const
+{
     QVector<LibraryAsset> result;
     if (!hasOpenLibrary()) {
         return result;
     }
 
-    QSqlQuery query(m_database);
-    if (!query.exec(QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets ORDER BY imported_at DESC"))) {
-        qWarning() << "Failed to query assets:" << query.lastError();
-        return result;
+    // If metadata cache is available and filters are specified, use it
+    if (m_metadataCache && m_metadataCache->hasOpenCache()) {
+        // Check if any filters are actually applied (not just default sort)
+        bool hasActiveFilters = (filterOptions.isoMin > 0 || filterOptions.isoMax > 0 || 
+                                 !filterOptions.cameraMake.isEmpty() || !filterOptions.tags.isEmpty());
+        
+        QVector<qint64> filteredIds = m_metadataCache->filterAssets(filterOptions);
+        
+        // Only return empty if filters were actively applied and no results found
+        // If no filters are active, fall through to query all assets
+        if (hasActiveFilters && filteredIds.isEmpty()) {
+            // Filters applied but no results
+            return result;
+        }
+        
+        // Build query with filtered IDs or all assets
+        QString querySql;
+        if (!hasActiveFilters && filteredIds.isEmpty()) {
+            // No filters and no metadata yet - query all assets from main database
+            querySql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets");
+        } else if (!filteredIds.isEmpty()) {
+            // Use filtered/sorted results from metadata cache
+            QStringList idPlaceholders;
+            for (int i = 0; i < filteredIds.size(); ++i) {
+                idPlaceholders.append(QStringLiteral("?"));
+            }
+            querySql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets WHERE id IN (%1)").arg(idPlaceholders.join(QStringLiteral(", ")));
+        } else {
+            // Has filters but no results - return empty
+            return result;
+        }
+
+        // Apply sorting if not handled by metadata cache
+        // When metadata cache handles sorting, we preserve the order from filteredIds
+        QString orderBy;
+        if (filteredIds.isEmpty()) {
+            // No metadata cache results, use simple sorting from main database
+            switch (filterOptions.sortOrder) {
+            case FilterOptions::SortByDateDesc:
+                orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                break;
+            case FilterOptions::SortByDateAsc:
+                orderBy = QStringLiteral("ORDER BY imported_at ASC");
+                break;
+            case FilterOptions::SortByFileName:
+                orderBy = QStringLiteral("ORDER BY file_name ASC");
+                break;
+            default:
+                orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                break;
+            }
+            if (!orderBy.isEmpty()) {
+                querySql += QStringLiteral(" %1").arg(orderBy);
+            }
+        } else {
+            // Metadata cache already sorted, preserve order by using filteredIds order
+            // Don't add ORDER BY - we'll preserve the order manually
+        }
+
+        QSqlQuery query(m_database);
+        if (!filteredIds.isEmpty()) {
+            query.prepare(querySql);
+            for (qint64 id : filteredIds) {
+                query.addBindValue(id);
+            }
+        } else {
+            query.prepare(querySql);
+        }
+
+        if (!query.exec()) {
+            qWarning() << "Failed to query filtered assets:" << query.lastError();
+            return result;
+        }
+
+        // Create a map for quick lookup
+        QHash<qint64, LibraryAsset> assetMap;
+        while (query.next()) {
+            LibraryAsset asset = hydrateAsset(query.record());
+            assetMap.insert(asset.id, asset);
+        }
+
+        // Preserve order from filteredIds if available
+        if (!filteredIds.isEmpty()) {
+            for (qint64 id : filteredIds) {
+                if (assetMap.contains(id)) {
+                    result.append(assetMap.value(id));
+                }
+            }
+        } else {
+            // No filters, use query order
+            result = assetMap.values().toVector();
+        }
+    } else {
+        // Fallback to simple query without metadata cache
+        QString orderBy;
+        switch (filterOptions.sortOrder) {
+        case FilterOptions::SortByDateDesc:
+            orderBy = QStringLiteral("ORDER BY imported_at DESC");
+            break;
+        case FilterOptions::SortByDateAsc:
+            orderBy = QStringLiteral("ORDER BY imported_at ASC");
+            break;
+        case FilterOptions::SortByFileName:
+            orderBy = QStringLiteral("ORDER BY file_name ASC");
+            break;
+        default:
+            orderBy = QStringLiteral("ORDER BY imported_at DESC");
+            break;
+        }
+
+        QSqlQuery query(m_database);
+        const QString sql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets %1").arg(orderBy);
+        if (!query.exec(sql)) {
+            qWarning() << "Failed to query assets:" << query.lastError();
+            return result;
+        }
+
+        while (query.next()) {
+            result.append(hydrateAsset(query.record()));
+        }
     }
 
-    while (query.next()) {
-        result.append(hydrateAsset(query.record()));
-    }
     return result;
+}
+
+MetadataCache *LibraryManager::metadataCache() const
+{
+    return m_metadataCache;
 }
 
 QString LibraryManager::resolvePath(const QString &relativePath) const
@@ -263,6 +455,27 @@ void LibraryManager::importFiles(const QStringList &filePaths)
     const int total = filePaths.size();
     int imported = 0;
     int nextPhotoNumber = currentMaxPhotoNumber();
+    
+    // Count how many files will need metadata extraction and preview generation
+    int metadataExtractionCount = 0;
+    int previewGenerationCount = 0;
+    
+    for (const QString &sourceFile : filePaths) {
+        QFileInfo info(sourceFile);
+        if (info.exists()) {
+            previewGenerationCount++;
+            if (m_metadataCache && m_metadataCache->hasOpenCache()) {
+                metadataExtractionCount++;
+            }
+        }
+    }
+    
+    if (previewGenerationCount > 0) {
+        startBatchPreviewJob(previewGenerationCount);
+    }
+    if (metadataExtractionCount > 0) {
+        startBatchMetadataJob(metadataExtractionCount);
+    }
 
     if (!m_database.transaction()) {
         emit errorOccurred(QStringLiteral("Failed to begin import transaction: %1").arg(m_database.lastError().text()));
@@ -319,6 +532,11 @@ void LibraryManager::importFiles(const QStringList &filePaths)
         }
         asset.previewRelativePath = reservedPreview;
 
+        // Enqueue metadata extraction in background
+        if (m_metadataCache && m_metadataCache->hasOpenCache()) {
+            enqueueMetadataExtraction(assetId, sourceFile);
+        }
+
         enqueuePreviewGeneration(asset);
         imported++;
         emit importProgress(imported, total);
@@ -330,6 +548,14 @@ void LibraryManager::importFiles(const QStringList &filePaths)
 
     emit assetsChanged();
     emit importCompleted();
+    
+    // Complete batch jobs if all are done (they may complete asynchronously)
+    if (m_previewGenerationTotal > 0 && m_previewGenerationCompleted >= m_previewGenerationTotal) {
+        completeBatchPreviewJob();
+    }
+    if (m_metadataExtractionTotal > 0 && m_metadataExtractionCompleted >= m_metadataExtractionTotal) {
+        completeBatchMetadataJob();
+    }
 }
 
 QString LibraryManager::ensureLibraryDirectories(const QString &directoryPath, QString *errorMessage)
@@ -511,6 +737,171 @@ QString LibraryManager::reservePreviewPath(qint64 assetId, int bucketIndex) cons
     return makePreviewRelativePath(bucketIndex, filename);
 }
 
+void LibraryManager::enqueueMetadataExtraction(qint64 assetId, const QString &sourceFile)
+{
+    if (m_metadataExtractionWatchers.contains(assetId)) {
+        // Already extracting metadata for this asset
+        return;
+    }
+
+    // Use batch job ID if available, otherwise create individual job (for backwards compatibility)
+    QUuid jobId = m_batchMetadataJobId.isNull() ? QUuid() : m_batchMetadataJobId;
+
+    auto *watcher = new QFutureWatcher<AssetMetadata>(this);
+    m_metadataExtractionWatchers.insert(assetId, watcher);
+
+    connect(watcher, &QFutureWatcher<AssetMetadata>::finished, this, [this, assetId, watcher, jobId]() {
+        handleMetadataExtractionComplete(assetId, jobId);
+        watcher->deleteLater();
+        m_metadataExtractionWatchers.remove(assetId);
+    });
+
+    // Extract metadata in background thread
+    QFuture<AssetMetadata> future = QtConcurrent::run([assetId, sourceFile]() -> AssetMetadata {
+        AssetMetadata meta;
+        meta.assetId = assetId;
+
+        DevelopMetadata developMeta;
+        if (!ImageLoader::extractMetadata(sourceFile, &developMeta, nullptr)) {
+            return meta;
+        }
+
+        // Parse ISO from string (e.g., "ISO 100" -> 100)
+        QString isoStr = developMeta.iso.trimmed();
+        if (isoStr.startsWith(QStringLiteral("ISO"), Qt::CaseInsensitive)) {
+            isoStr = isoStr.mid(3).trimmed();
+        }
+        bool ok = false;
+        int isoValue = isoStr.toInt(&ok);
+        meta.iso = ok ? isoValue : 0;
+
+        meta.cameraMake = developMeta.cameraMake.trimmed();
+        meta.cameraModel = developMeta.cameraModel.trimmed();
+        meta.captureDate = developMeta.captureDateTime;
+
+        return meta;
+    });
+
+    watcher->setFuture(future);
+}
+
+void LibraryManager::handleMetadataExtractionComplete(qint64 assetId, const QUuid &jobId)
+{
+    auto *watcher = m_metadataExtractionWatchers.value(assetId, nullptr);
+    if (!watcher || !watcher->isFinished()) {
+        m_metadataExtractionCompleted++;
+        updateBatchMetadataProgress();
+        return;
+    }
+
+    if (!m_metadataCache || !m_metadataCache->hasOpenCache()) {
+        m_metadataExtractionCompleted++;
+        updateBatchMetadataProgress();
+        return;
+    }
+
+    AssetMetadata meta = watcher->result();
+    if (meta.assetId != assetId) {
+        m_metadataExtractionCompleted++;
+        updateBatchMetadataProgress();
+        return; // Invalid result
+    }
+
+    QString metaError;
+    if (!m_metadataCache->updateMetadata(assetId, meta, &metaError)) {
+        qWarning() << "Failed to store metadata for asset" << assetId << ":" << metaError;
+        m_metadataExtractionCompleted++;
+        updateBatchMetadataProgress();
+    } else {
+        m_metadataExtractionCompleted++;
+        updateBatchMetadataProgress();
+        // Emit signal to update filter pane options if needed
+        emit assetsChanged();
+    }
+}
+
+void LibraryManager::startBatchMetadataJob(int total)
+{
+    if (!m_jobManager || total <= 0) {
+        return;
+    }
+    
+    m_metadataExtractionTotal = total;
+    m_metadataExtractionCompleted = 0;
+    m_batchMetadataJobId = m_jobManager->startJob(JobCategory::MetadataExtraction, 
+                                                   tr("Extracting metadata"), 
+                                                   tr("0 of %1 extracted").arg(total));
+    m_jobManager->setIndeterminate(m_batchMetadataJobId, false);
+    m_jobManager->updateProgress(m_batchMetadataJobId, 0, total);
+}
+
+void LibraryManager::updateBatchMetadataProgress()
+{
+    if (!m_jobManager || m_batchMetadataJobId.isNull() || m_metadataExtractionTotal <= 0) {
+        return;
+    }
+    
+    m_jobManager->updateProgress(m_batchMetadataJobId, m_metadataExtractionCompleted, m_metadataExtractionTotal);
+    m_jobManager->updateDetail(m_batchMetadataJobId, tr("%1 of %2 extracted").arg(m_metadataExtractionCompleted).arg(m_metadataExtractionTotal));
+    
+    if (m_metadataExtractionCompleted >= m_metadataExtractionTotal) {
+        completeBatchMetadataJob();
+    }
+}
+
+void LibraryManager::completeBatchMetadataJob()
+{
+    if (!m_jobManager || m_batchMetadataJobId.isNull()) {
+        return;
+    }
+    
+    m_jobManager->completeJob(m_batchMetadataJobId, tr("All metadata extracted"));
+    m_batchMetadataJobId = QUuid();
+    m_metadataExtractionTotal = 0;
+    m_metadataExtractionCompleted = 0;
+}
+
+void LibraryManager::startBatchPreviewJob(int total)
+{
+    if (!m_jobManager || total <= 0) {
+        return;
+    }
+    
+    m_previewGenerationTotal = total;
+    m_previewGenerationCompleted = 0;
+    m_batchPreviewJobId = m_jobManager->startJob(JobCategory::PreviewGeneration, 
+                                                  tr("Generating previews"), 
+                                                  tr("0 of %1 generated").arg(total));
+    m_jobManager->setIndeterminate(m_batchPreviewJobId, false);
+    m_jobManager->updateProgress(m_batchPreviewJobId, 0, total);
+}
+
+void LibraryManager::updateBatchPreviewProgress()
+{
+    if (!m_jobManager || m_batchPreviewJobId.isNull() || m_previewGenerationTotal <= 0) {
+        return;
+    }
+    
+    m_jobManager->updateProgress(m_batchPreviewJobId, m_previewGenerationCompleted, m_previewGenerationTotal);
+    m_jobManager->updateDetail(m_batchPreviewJobId, tr("%1 of %2 generated").arg(m_previewGenerationCompleted).arg(m_previewGenerationTotal));
+    
+    if (m_previewGenerationCompleted >= m_previewGenerationTotal) {
+        completeBatchPreviewJob();
+    }
+}
+
+void LibraryManager::completeBatchPreviewJob()
+{
+    if (!m_jobManager || m_batchPreviewJobId.isNull()) {
+        return;
+    }
+    
+    m_jobManager->completeJob(m_batchPreviewJobId, tr("All previews generated"));
+    m_batchPreviewJobId = QUuid();
+    m_previewGenerationTotal = 0;
+    m_previewGenerationCompleted = 0;
+}
+
 void LibraryManager::enqueuePreviewGeneration(const LibraryAsset &asset)
 {
     PreviewJob job;
@@ -519,12 +910,19 @@ void LibraryManager::enqueuePreviewGeneration(const LibraryAsset &asset)
     job.previewPath = absoluteAssetPath(asset.previewRelativePath);
     job.maxHeight = kPreviewHeight;
 
-    if (m_jobManager) {
+    // Use batch job ID if available, otherwise create individual job (for backwards compatibility)
+    QUuid jobId = m_batchPreviewJobId.isNull() ? QUuid() : m_batchPreviewJobId;
+    
+    if (m_jobManager && m_batchPreviewJobId.isNull()) {
+        // Only create individual job if not using batch job
         const QString title = tr("Generating preview");
         const QString detail = QFileInfo(job.sourcePath).fileName();
-        QUuid jobId = m_jobManager->startJob(JobCategory::PreviewGeneration, title, detail);
+        jobId = m_jobManager->startJob(JobCategory::PreviewGeneration, title, detail);
         m_jobManager->setIndeterminate(jobId, true);
         m_previewJobIds.insert(asset.id, jobId);
+    } else if (!m_batchPreviewJobId.isNull()) {
+        // Store batch job ID for this asset
+        m_previewJobIds.insert(asset.id, m_batchPreviewJobId);
     }
 
     m_previewGenerator->enqueueJob(job);

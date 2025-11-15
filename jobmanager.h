@@ -20,6 +20,7 @@ enum class JobState {
 enum class JobCategory {
     Import,
     PreviewGeneration,
+    MetadataExtraction,
     Develop,
     Histogram,
     Export,

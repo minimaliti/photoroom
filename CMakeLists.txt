@@ -28,8 +28,12 @@ set(PROJECT_SOURCES
     imageloader.h
     librarygridview.cpp
     librarygridview.h
+    libraryfilterpane.cpp
+    libraryfilterpane.h
     librarymanager.cpp
     librarymanager.h
+    metadatacache.cpp
+    metadatacache.h
     previewgenerator.cpp
     previewgenerator.h
     histogramwidget.cpp

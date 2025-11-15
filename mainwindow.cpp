@@ -2,6 +2,7 @@
 #include "./ui_mainwindow.h"
 #include "preferencesdialog.h"
 #include "librarygridview.h"
+#include "libraryfilterpane.h"
 #include "histogramwidget.h"
 #include "jobmanager.h"
 #include "jobswindow.h"
@@ -364,6 +365,14 @@ MainWindow::MainWindow(QWidget *parent)
     setupJobSystem();
     bindLibrarySignals();
 
+    // Create filter pane
+    m_libraryFilterPane = new LibraryFilterPane(this);
+    connect(m_libraryFilterPane, &LibraryFilterPane::filterChanged,
+            this, [this](const FilterOptions &options) {
+                refreshLibraryView(options);
+            });
+
+    // Create library grid view
     m_libraryGridView = new LibraryGridView(this);
     connect(m_libraryGridView, &LibraryGridView::assetActivated,
             this, &MainWindow::openAssetInDevelop);
@@ -372,6 +381,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_libraryGridView, &LibraryGridView::folderDropped,
             this, &MainWindow::handleFolderDropped);
 
+    // Add filter pane and grid view to layout
+    if (ui->libraryPageLayout) {
+        ui->libraryPageLayout->insertWidget(0, m_libraryFilterPane);
+    }
     if (ui->libraryGridLayout) {
         ui->libraryGridLayout->addWidget(m_libraryGridView);
     }
@@ -794,6 +807,7 @@ void MainWindow::bindLibrarySignals()
     }
 
     connect(m_libraryManager, &LibraryManager::libraryOpened, this, [this](const QString &path) {
+        updateFilterPaneOptions();
         currentLibraryPath = path;
         if (ui->actionImport) {
             ui->actionImport->setEnabled(true);
@@ -810,7 +824,14 @@ void MainWindow::bindLibrarySignals()
         clearLibrary();
     });
 
-    connect(m_libraryManager, &LibraryManager::assetsChanged, this, &MainWindow::refreshLibraryView);
+    connect(m_libraryManager, &LibraryManager::assetsChanged, this, [this]() {
+        updateFilterPaneOptions();
+        if (m_libraryFilterPane) {
+            refreshLibraryView(m_libraryFilterPane->currentFilterOptions());
+        } else {
+            refreshLibraryView();
+        }
+    });
     connect(m_libraryManager, &LibraryManager::assetPreviewUpdated, this, &MainWindow::updateThumbnailPreview);
 
     connect(m_libraryManager, &LibraryManager::importProgress, this, &MainWindow::handleImportProgress);
@@ -936,6 +957,40 @@ void MainWindow::handleLibraryError(const QString &message)
 
 void MainWindow::refreshLibraryView()
 {
+    FilterOptions defaultOptions;
+    defaultOptions.sortOrder = FilterOptions::SortByDateDesc;
+    refreshLibraryView(defaultOptions);
+}
+
+void MainWindow::updateFilterPaneOptions()
+{
+    if (!m_libraryFilterPane || !m_libraryManager || !m_libraryManager->hasOpenLibrary()) {
+        return;
+    }
+
+    MetadataCache *cache = m_libraryManager->metadataCache();
+    if (!cache || !cache->hasOpenCache()) {
+        return;
+    }
+
+    // Update available camera makes
+    QStringList cameraMakes = cache->getAllCameraMakes();
+    m_libraryFilterPane->setAvailableCameraMakes(cameraMakes);
+
+    // Update ISO range
+    int minIso = cache->getMinIso();
+    int maxIso = cache->getMaxIso();
+    if (minIso > 0 && maxIso > 0) {
+        m_libraryFilterPane->setIsoRange(minIso, maxIso);
+    }
+
+    // Update available tags
+    QStringList tags = cache->getAllTags();
+    m_libraryFilterPane->setAvailableTags(tags);
+}
+
+void MainWindow::refreshLibraryView(const FilterOptions &filterOptions)
+{
     if (!m_libraryGridView) {
         return;
     }
@@ -947,7 +1002,7 @@ void MainWindow::refreshLibraryView()
         return;
     }
 
-    m_assets = m_libraryManager->assets();
+    m_assets = m_libraryManager->assets(filterOptions);
 
     QVector<LibraryGridItem> items;
     items.reserve(m_assets.size());

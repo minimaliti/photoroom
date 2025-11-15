@@ -25,6 +25,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class LibraryGridView;
+class LibraryFilterPane;
 class HistogramWidget;
 class JobManager;
 class JobsWindow;
@@ -91,6 +92,7 @@ private:
     QGraphicsScene *m_developScene = nullptr;
     QGraphicsPixmapItem *m_developPixmapItem = nullptr;
     LibraryGridView *m_libraryGridView = nullptr;
+    LibraryFilterPane *m_libraryFilterPane = nullptr;
     HistogramWidget *m_histogramWidget = nullptr;
 
     QString currentLibraryPath;
@@ -110,6 +112,8 @@ private:
     void initializeDevelopHistogram();
     void bindLibrarySignals();
     void refreshLibraryView();
+    void refreshLibraryView(const FilterOptions &filterOptions);
+    void updateFilterPaneOptions();
     void updateThumbnailPreview(qint64 assetId, const QString &previewPath);
     QString assetPreviewPath(const LibraryAsset &asset) const;
     QString assetOriginalPath(const LibraryAsset &asset) const;

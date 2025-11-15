@@ -9,8 +9,11 @@
 #include <QVector>
 #include <QHash>
 #include <QUuid>
+#include <QFutureWatcher>
+#include <QFuture>
 
 #include "developtypes.h"
+#include "metadatacache.h"
 
 struct LibraryAsset
 {
@@ -44,7 +47,10 @@ public:
     void setJobManager(JobManager *jobManager);
 
     QVector<LibraryAsset> assets() const;
+    QVector<LibraryAsset> assets(const FilterOptions &filterOptions) const;
     QString resolvePath(const QString &relativePath) const;
+    
+    MetadataCache *metadataCache() const;
 
     void importFiles(const QStringList &filePaths);
 
@@ -89,6 +95,23 @@ private:
     PreviewGenerator *m_previewGenerator = nullptr;
     JobManager *m_jobManager = nullptr;
     QHash<qint64, QUuid> m_previewJobIds;
+    QUuid m_batchPreviewJobId;
+    int m_previewGenerationTotal = 0;
+    int m_previewGenerationCompleted = 0;
+    QHash<qint64, QUuid> m_metadataJobIds;
+    QUuid m_batchMetadataJobId;
+    int m_metadataExtractionTotal = 0;
+    int m_metadataExtractionCompleted = 0;
+    MetadataCache *m_metadataCache = nullptr;
+    QHash<qint64, QFutureWatcher<AssetMetadata>*> m_metadataExtractionWatchers;
+    void enqueueMetadataExtraction(qint64 assetId, const QString &sourceFile);
+    void handleMetadataExtractionComplete(qint64 assetId, const QUuid &jobId);
+    void startBatchMetadataJob(int total);
+    void updateBatchMetadataProgress();
+    void completeBatchMetadataJob();
+    void startBatchPreviewJob(int total);
+    void updateBatchPreviewProgress();
+    void completeBatchPreviewJob();
 };
 
 #endif // LIBRARYMANAGER_H
