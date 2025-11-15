@@ -7,6 +7,7 @@
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QMutex>
+#include <QThreadStorage>
 
 #include <atomic>
 #include <memory>
@@ -22,6 +23,7 @@ struct DevelopAdjustmentRenderResult
     qint64 elapsedMs = 0;
     bool isPreview = false;
     double displayScale = 1.0;
+    QString errorMessage;
 };
 
 struct DevelopAdjustmentRequest
@@ -45,6 +47,9 @@ public:
     explicit DevelopAdjustmentEngine(QObject *parent = nullptr);
     ~DevelopAdjustmentEngine() override;
 
+    // Must be called on the main/GUI thread to initialize GPU resources
+    void initializeGpuOnMainThread();
+
     QFuture<DevelopAdjustmentRenderResult> renderAsync(DevelopAdjustmentRequest request);
 
     void cancelActive();
@@ -61,8 +66,6 @@ private:
     bool initializeGpu();
     DevelopAdjustmentRenderResult renderWithGpu(const DevelopAdjustmentRequest &request,
                                                 const std::shared_ptr<CancellationToken> &token);
-    DevelopAdjustmentRenderResult renderWithCpu(const DevelopAdjustmentRequest &request,
-                                                const std::shared_ptr<CancellationToken> &token);
 
     bool m_gpuInitialized = false;
     bool m_gpuAvailable = false;
@@ -70,6 +73,11 @@ private:
     std::unique_ptr<QOffscreenSurface> m_offscreenSurface;
     mutable QMutex m_glMutex;
     GLuint m_computeProgram = 0;
+    
+    // Thread-local contexts for background rendering (shared with main context)
+    mutable QThreadStorage<QOpenGLContext*> m_threadContexts;
+    mutable QThreadStorage<QOffscreenSurface*> m_threadSurfaces;
+    QOpenGLContext* getOrCreateThreadContext() const;
 };
 
 #endif // DEVELOPADJUSTMENTENGINE_H

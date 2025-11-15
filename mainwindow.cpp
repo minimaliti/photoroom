@@ -12,6 +12,7 @@
 
 #include <QAction>
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
@@ -36,6 +37,7 @@
 #include <QResizeEvent>
 #include <QStringList>
 #include <QThreadPool>
+#include <QThread>
 #include <QTransform>
 #include <QColorSpace>
 #include <QtConcurrent/QtConcurrentRun>
@@ -61,6 +63,7 @@
 #include <QSlider>
 #include <QDoubleSpinBox>
 #include <QSet>
+#include <QSurfaceFormat>
 
 #include "imageloader.h"
 
@@ -482,22 +485,64 @@ MainWindow::MainWindow(QWidget *parent)
 
 void MainWindow::ensureDevelopViewInitialized()
 {
-    if (m_developScene || !ui->developImageView) {
+    qDebug() << "ensureDevelopViewInitialized: Called from thread:" << QThread::currentThread()
+             << "isMainThread:" << (QThread::currentThread() == QCoreApplication::instance()->thread());
+    
+    if (!ui->developImageView) {
+        qDebug() << "ensureDevelopViewInitialized: developImageView is null, skipping initialization";
         initializeDevelopHistogram();
         return;
     }
 
+    if (m_developScene) {
+        qDebug() << "ensureDevelopViewInitialized: Scene already initialized";
+        initializeDevelopHistogram();
+        return;
+    }
+
+    qDebug() << "ensureDevelopViewInitialized: Creating new scene and OpenGL viewport";
     m_developScene = new QGraphicsScene(this);
     m_developScene->setItemIndexMethod(QGraphicsScene::NoIndex);
     ui->developImageView->setScene(m_developScene);
-    if (!qobject_cast<QOpenGLWidget*>(ui->developImageView->viewport())) {
-        auto *glViewport = new QOpenGLWidget(ui->developImageView);
+    
+    // Ensure OpenGL viewport for GPU rendering
+    QOpenGLWidget *glViewport = qobject_cast<QOpenGLWidget*>(ui->developImageView->viewport());
+    if (!glViewport) {
+        qDebug() << "ensureDevelopViewInitialized: Creating new QOpenGLWidget viewport";
+        QSurfaceFormat format;
+        format.setVersion(3, 3);
+        format.setProfile(QSurfaceFormat::CoreProfile);
+        format.setRenderableType(QSurfaceFormat::OpenGL);
+        format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+        format.setSamples(0); // Disable MSAA for better performance
+        
+        qDebug() << "ensureDevelopViewInitialized: OpenGL format - Version:" << format.majorVersion() << format.minorVersion()
+                 << "Profile:" << (format.profile() == QSurfaceFormat::CoreProfile ? "Core" : "Compatibility")
+                 << "Renderable:" << (format.renderableType() == QSurfaceFormat::OpenGL ? "OpenGL" : "OpenGLES");
+        
+        glViewport = new QOpenGLWidget(ui->developImageView);
+        glViewport->setFormat(format);
         glViewport->setUpdateBehavior(QOpenGLWidget::PartialUpdate);
         ui->developImageView->setViewport(glViewport);
+        
+        qDebug() << "ensureDevelopViewInitialized: QOpenGLWidget created, isValid:" << glViewport->isValid()
+                 << "format:" << glViewport->format().majorVersion() << glViewport->format().minorVersion()
+                 << "isVisible:" << glViewport->isVisible();
+        
+        // QOpenGLWidget may not be valid until it's shown, but we can still set it up
+        // The context will be created when the widget is first painted
+        if (!glViewport->isVisible()) {
+            glViewport->show(); // Ensure widget is visible for context creation
+        }
+    } else {
+        qDebug() << "ensureDevelopViewInitialized: Using existing QOpenGLWidget viewport, isValid:" << glViewport->isValid()
+                 << "isVisible:" << glViewport->isVisible();
     }
-    ui->developImageView->setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
-    ui->developImageView->setCacheMode(QGraphicsView::CacheBackground);
+    
+    ui->developImageView->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    ui->developImageView->setCacheMode(QGraphicsView::CacheNone); // Disable CPU caching for GPU rendering
     ui->developImageView->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    ui->developImageView->setRenderHint(QPainter::Antialiasing, true);
     ui->developImageView->setDragMode(QGraphicsView::ScrollHandDrag);
     ui->developImageView->setOptimizationFlags(QGraphicsView::DontSavePainterState | QGraphicsView::DontAdjustForAntialiasing);
     ui->developImageView->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
@@ -506,7 +551,11 @@ void MainWindow::ensureDevelopViewInitialized()
 
     m_developPixmapItem = m_developScene->addPixmap(QPixmap());
     m_developPixmapItem->setVisible(false);
+    m_developPixmapItem->setTransformationMode(Qt::SmoothTransformation);
+    m_developPixmapItem->setCacheMode(QGraphicsItem::NoCache); // Force GPU rendering
 
+    qDebug() << "ensureDevelopViewInitialized: Initialization complete, scene:" << m_developScene
+             << "pixmapItem:" << m_developPixmapItem;
     initializeDevelopHistogram();
 }
 
@@ -668,6 +717,16 @@ void MainWindow::showDevelopPreview(const QPixmap &pixmap)
         return;
     }
 
+    if (!ui->developImageView) {
+        return;
+    }
+
+    // Ensure the viewport is visible and has valid context
+    QOpenGLWidget *glViewport = qobject_cast<QOpenGLWidget*>(ui->developImageView->viewport());
+    if (glViewport && !glViewport->isVisible()) {
+        glViewport->show();
+    }
+
     m_developPixmapItem->setPixmap(pixmap);
     m_developPixmapItem->setVisible(true);
     m_developScene->setSceneRect(pixmap.rect());
@@ -678,6 +737,13 @@ void MainWindow::showDevelopPreview(const QPixmap &pixmap)
 
     if (ui->stackedWidget && ui->developPage) {
         ui->stackedWidget->setCurrentWidget(ui->developPage);
+    }
+
+    // Force viewport update for GPU rendering
+    m_developScene->update();
+    if (ui->developImageView) {
+        ui->developImageView->viewport()->update();
+        ui->developImageView->update();
     }
 
     fitDevelopViewToImage();
@@ -1130,6 +1196,9 @@ void MainWindow::setupAdjustmentEngine()
 {
     if (!m_adjustmentEngine) {
         m_adjustmentEngine = new DevelopAdjustmentEngine(this);
+        // Initialize GPU on the main thread before any rendering
+        qDebug() << "setupAdjustmentEngine: Initializing GPU on main thread";
+        m_adjustmentEngine->initializeGpuOnMainThread();
     }
 
     m_adjustmentPersistTimer.setSingleShot(true);
@@ -1138,7 +1207,7 @@ void MainWindow::setupAdjustmentEngine()
             this, &MainWindow::persistCurrentAdjustments);
 
     m_fullRenderTimer.setSingleShot(true);
-    m_fullRenderTimer.setInterval(180);
+    m_fullRenderTimer.setInterval(300); // Slightly longer delay for full render after preview
     connect(&m_fullRenderTimer, &QTimer::timeout, this, [this]() {
         startFullRender();
     });
@@ -1351,7 +1420,8 @@ void MainWindow::handleAdjustmentChanged()
     }
     m_savingAdjustmentsPending = true;
     scheduleAdjustmentPersist();
-    requestAdjustmentRender();
+    // Always use preview render for real-time feedback, then queue full render
+    requestAdjustmentRender(false, false);
 }
 
 bool MainWindow::adjustmentsAreIdentity(const DevelopAdjustments &adjustments) const
@@ -1411,13 +1481,16 @@ void MainWindow::requestAdjustmentRender(bool forceImmediate, bool skipCancel)
         return;
     }
 
-    if (shouldUsePreviewRender()) {
-        ensurePreviewImageReady();
-        startPreviewRender();
+    // For real-time feedback: always start with preview render immediately
+    // Then queue full render after a delay
+    ensurePreviewImageReady();
+    m_previewRenderEnabled = true;
+    startPreviewRender();
+    
+    // Queue full render after delay (only if image is small enough for real-time)
+    if (!shouldUsePreviewRender()) {
+        // For smaller images, also queue a full render after delay
         m_fullRenderTimer.start();
-    } else {
-        m_previewRenderEnabled = false;
-        startFullRender();
     }
 }
 
@@ -1526,7 +1599,8 @@ bool MainWindow::shouldUsePreviewRender() const
     const int maxDimension = qMax(m_currentDevelopOriginalImage.width(), m_currentDevelopOriginalImage.height());
     const qint64 totalPixels = static_cast<qint64>(m_currentDevelopOriginalImage.width()) *
                                static_cast<qint64>(m_currentDevelopOriginalImage.height());
-    if (totalPixels <= 12'000'000) { // ~12 MP
+    // Use preview for images larger than 8MP for real-time feedback
+    if (totalPixels <= 8'000'000) { // ~8 MP
         return false;
     }
     return maxDimension > 2048;
@@ -1581,15 +1655,36 @@ void MainWindow::applyDevelopImage(const QImage &image,
         return;
     }
 
-    const QPixmap pixmap = QPixmap::fromImage(image);
+    if (!ui->developImageView) {
+        qDebug() << "applyDevelopImage: developImageView is null";
+        return;
+    }
+
+    // Convert image to GPU-friendly format for OpenGL rendering
+    QImage gpuImage = image;
+    if (gpuImage.format() != QImage::Format_RGB32 && gpuImage.format() != QImage::Format_ARGB32 && 
+        gpuImage.format() != QImage::Format_RGBA8888 && gpuImage.format() != QImage::Format_RGBX8888) {
+        gpuImage = gpuImage.convertToFormat(QImage::Format_RGBA8888);
+    }
+
+    // Create pixmap - QPixmap will use GPU when OpenGL viewport is active
+    const QPixmap pixmap = QPixmap::fromImage(gpuImage);
     if (pixmap.isNull()) {
         qDebug() << "applyDevelopImage: Failed to create pixmap from image";
         return;
     }
 
     qDebug() << "applyDevelopImage: Applying image to viewport, size:" << image.size() << "isPreview:" << isPreview;
+    
+    // Ensure the viewport is visible and has valid context
+    QOpenGLWidget *glViewport = qobject_cast<QOpenGLWidget*>(ui->developImageView->viewport());
+    if (glViewport && !glViewport->isVisible()) {
+        glViewport->show();
+    }
+
     m_developPixmapItem->setPixmap(pixmap);
     m_developPixmapItem->setVisible(true);
+    
     if (isPreview && !qFuzzyCompare(displayScale, 1.0)) {
         const QSizeF scaledSize = QSizeF(image.width() * displayScale,
                                          image.height() * displayScale);
@@ -1600,17 +1695,21 @@ void MainWindow::applyDevelopImage(const QImage &image,
         m_developPixmapItem->setScale(1.0);
     }
 
-    // Force viewport update to refresh the display
-    if (ui->developImageView) {
-        ui->developImageView->viewport()->update();
-    }
-    m_developScene->update();
-
+    // Ensure the viewer stack shows the image view
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
     }
     if (ui->stackedWidget && ui->developPage) {
         ui->stackedWidget->setCurrentWidget(ui->developPage);
+    }
+
+    // Force comprehensive viewport update for GPU rendering
+    m_developScene->update();
+    if (ui->developImageView) {
+        ui->developImageView->viewport()->update();
+        ui->developImageView->update();
+        // Force immediate repaint
+        QApplication::processEvents();
     }
 
     if (m_developFitMode) {
@@ -2068,6 +2167,12 @@ void MainWindow::fitDevelopViewToImage()
     ui->developImageView->fitInView(m_developPixmapItem, Qt::KeepAspectRatio);
     m_developZoom = ui->developImageView->transform().m11();
 
+    // Force viewport update after fit
+    if (ui->developImageView) {
+        ui->developImageView->viewport()->update();
+        ui->developImageView->update();
+    }
+
     if (ui->developZoomCombo) {
         QSignalBlocker blocker(ui->developZoomCombo);
         ui->developZoomCombo->setCurrentText(tr("Fit"));
@@ -2103,6 +2208,12 @@ void MainWindow::applyDevelopZoomPreset(const QString &preset)
     QTransform transform;
     transform.scale(m_developZoom, m_developZoom);
     ui->developImageView->setTransform(transform);
+
+    // Force viewport update after zoom
+    if (ui->developImageView) {
+        ui->developImageView->viewport()->update();
+        ui->developImageView->update();
+    }
 
     if (ui->developViewerStack && ui->developImageViewPage) {
         ui->developViewerStack->setCurrentWidget(ui->developImageViewPage);
