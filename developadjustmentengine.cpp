@@ -10,6 +10,7 @@
 #include <QSurfaceFormat>
 #include <QVector>
 #include <QMutexLocker>
+#include <QDebug>
 
 #include <algorithm>
 #include <array>
@@ -52,7 +53,15 @@ uniform float widthInv;
 uniform float heightInv;
 uniform float centerX;
 uniform float centerY;
+uniform float sharpening;
+uniform float noiseReduction;
+uniform float grainAmount;
 uniform int applyClarity;
+uniform int applySharpening;
+uniform int applyNoiseReduction;
+uniform int applyGrain;
+uniform int imageWidth;
+uniform int imageHeight;
 
 float clamp01(float v) {
     return clamp(v, 0.0, 1.0);
@@ -188,6 +197,42 @@ void main() {
 
     rgb = applyHue(rgb, hueShift, saturationShift, luminanceShift);
 
+    // Apply sharpening (reads from original image, applies to adjusted rgb)
+    if (applySharpening == 1 && sharpening > 0.01) {
+        ivec2 leftCoord = ivec2(max(0, coord.x - 1), coord.y);
+        ivec2 rightCoord = ivec2(min(imageWidth - 1, coord.x + 1), coord.y);
+        ivec2 upCoord = ivec2(coord.x, max(0, coord.y - 1));
+        ivec2 downCoord = ivec2(coord.x, min(imageHeight - 1, coord.y + 1));
+        
+        vec3 centerOrig = imageLoad(inputImage, coord).rgb * exposureMultiplier;
+        vec3 leftOrig = imageLoad(inputImage, leftCoord).rgb * exposureMultiplier;
+        vec3 rightOrig = imageLoad(inputImage, rightCoord).rgb * exposureMultiplier;
+        vec3 upOrig = imageLoad(inputImage, upCoord).rgb * exposureMultiplier;
+        vec3 downOrig = imageLoad(inputImage, downCoord).rgb * exposureMultiplier;
+        
+        float amount = sharpening * 0.5;
+        vec3 detail = centerOrig * 4.0 - (leftOrig + rightOrig + upOrig + downOrig);
+        rgb = clamp(rgb + detail * amount, 0.0, 1.0);
+    }
+
+    // Apply noise reduction
+    if (applyNoiseReduction == 1 && noiseReduction > 0.01) {
+        float blend = clamp(noiseReduction * 0.4, 0.0, 1.0);
+        float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+        rgb = mix(rgb, vec3(lum), blend);
+    }
+
+    // Apply grain
+    if (applyGrain == 1 && grainAmount > 0.0) {
+        uint seed = uint(coord.x) * 1973u + uint(coord.y) * 9277u + 0x7f4a7c15u;
+        seed = (seed << 13u) ^ seed;
+        uint result = (seed * (seed * seed * 15731u + 789221u) + 1376312589u) & 0x7fffffffu;
+        float noise = float(result) / float(0x7fffffffu) - 0.5;
+        float delta = noise * grainAmount;
+        rgb = clamp(rgb + vec3(delta), 0.0, 1.0);
+    }
+
+    // Apply vignette
     float dx = (float(coord.x) - centerX) * widthInv;
     float dy = (float(coord.y) - centerY) * heightInv;
     float distance = sqrt(dx * dx + dy * dy);
@@ -723,8 +768,8 @@ bool DevelopAdjustmentEngine::initializeGpu()
     QSurfaceFormat format;
     format.setRenderableType(QSurfaceFormat::OpenGL);
     format.setProfile(QSurfaceFormat::CoreProfile);
-    format.setVersion(4, 5);
-    format.setOption(QSurfaceFormat::DebugContext);
+    format.setVersion(4, 3); // Minimum for compute shaders
+    format.setOption(QSurfaceFormat::DebugContext, false);
 
     auto context = std::make_unique<QOpenGLContext>();
     context->setFormat(format);
@@ -748,14 +793,41 @@ bool DevelopAdjustmentEngine::initializeGpu()
     }
 
     QOpenGLFunctions_4_5_Core funcs;
-    funcs.initializeOpenGLFunctions();
+    if (!funcs.initializeOpenGLFunctions()) {
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
+
+    // Check for compute shader support
+    GLint maxComputeWorkGroupInvocations = 0;
+    funcs.glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &maxComputeWorkGroupInvocations);
+    if (maxComputeWorkGroupInvocations == 0) {
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
 
     GLuint shader = funcs.glCreateShader(GL_COMPUTE_SHADER);
+    if (shader == 0) {
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
+
     funcs.glShaderSource(shader, 1, &kComputeShaderSource, nullptr);
     funcs.glCompileShader(shader);
+    
     GLint compileStatus = 0;
     funcs.glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
     if (!compileStatus) {
+        GLint logLength = 0;
+        funcs.glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
+        if (logLength > 0) {
+            QVector<char> log(logLength);
+            funcs.glGetShaderInfoLog(shader, logLength, nullptr, log.data());
+            qWarning("Compute shader compilation failed: %s", log.data());
+        }
         funcs.glDeleteShader(shader);
         context->doneCurrent();
         m_gpuAvailable = false;
@@ -763,12 +835,28 @@ bool DevelopAdjustmentEngine::initializeGpu()
     }
 
     GLuint program = funcs.glCreateProgram();
+    if (program == 0) {
+        funcs.glDeleteShader(shader);
+        context->doneCurrent();
+        m_gpuAvailable = false;
+        return false;
+    }
+
     funcs.glAttachShader(program, shader);
     funcs.glLinkProgram(program);
+    
     GLint linkStatus = 0;
     funcs.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
     funcs.glDeleteShader(shader);
+    
     if (!linkStatus) {
+        GLint logLength = 0;
+        funcs.glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
+        if (logLength > 0) {
+            QVector<char> log(logLength);
+            funcs.glGetProgramInfoLog(program, logLength, nullptr, log.data());
+            qWarning("Compute shader program linking failed: %s", log.data());
+        }
         funcs.glDeleteProgram(program);
         context->doneCurrent();
         m_gpuAvailable = false;
@@ -807,6 +895,9 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         return result;
     }
 
+    QElapsedTimer timer;
+    timer.start();
+
     QOpenGLFunctions_4_5_Core funcs;
     funcs.initializeOpenGLFunctions();
 
@@ -821,13 +912,16 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         return result;
     }
 
+    // Optimize texture data conversion using constBits for direct access
     QVector<float> textureData(width * height * 4);
     const uchar *srcBits = sourceImage.constBits();
-    for (int i = 0; i < width * height; ++i) {
-        textureData[i * 4 + 0] = srcBits[i * 4 + 0] * kInv255;
-        textureData[i * 4 + 1] = srcBits[i * 4 + 1] * kInv255;
-        textureData[i * 4 + 2] = srcBits[i * 4 + 2] * kInv255;
-        textureData[i * 4 + 3] = srcBits[i * 4 + 3] * kInv255;
+    const int pixelCount = width * height;
+    for (int i = 0; i < pixelCount; ++i) {
+        const int idx = i * 4;
+        textureData[idx + 0] = srcBits[idx + 0] * kInv255;
+        textureData[idx + 1] = srcBits[idx + 1] * kInv255;
+        textureData[idx + 2] = srcBits[idx + 2] * kInv255;
+        textureData[idx + 3] = srcBits[idx + 3] * kInv255;
     }
 
     GLuint inputTex = 0;
@@ -840,20 +934,23 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         funcs.glDeleteTextures(1, &outputTex);
     };
 
+    // Setup input texture
     funcs.glActiveTexture(GL_TEXTURE0);
     funcs.glBindTexture(GL_TEXTURE_2D, inputTex);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    funcs.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, textureData.constData());
+    funcs.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, width, height);
+    funcs.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, textureData.constData());
 
+    // Setup output texture
     funcs.glBindTexture(GL_TEXTURE_2D, outputTex);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     funcs.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    funcs.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    funcs.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, width, height);
 
     funcs.glUseProgram(m_computeProgram);
 
@@ -892,11 +989,19 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     uniform("vignetteStrength", pre.vignetteStrength);
     uniform("vignetteFalloff", pre.vignetteFalloff);
     uniform("clarityStrength", pre.clarityStrength);
+    uniform("sharpening", pre.sharpening);
+    uniform("noiseReduction", pre.noiseReduction);
+    uniform("grainAmount", pre.grainAmount);
     uniform("widthInv", pre.invWidth);
     uniform("heightInv", pre.invHeight);
     uniform("centerX", pre.centerX);
     uniform("centerY", pre.centerY);
     uniformInt("applyClarity", request.isPreview ? 0 : 1);
+    uniformInt("applySharpening", (request.isPreview || pre.sharpening <= 0.01f) ? 0 : 1);
+    uniformInt("applyNoiseReduction", (request.isPreview || pre.noiseReduction <= 0.01f) ? 0 : 1);
+    uniformInt("applyGrain", (pre.grainAmount <= 0.0f) ? 0 : 1);
+    uniformInt("imageWidth", width);
+    uniformInt("imageHeight", height);
 
     funcs.glBindImageTexture(0, inputTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA32F);
     funcs.glBindImageTexture(1, outputTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
@@ -915,6 +1020,7 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         return result;
     }
 
+    // Read back results
     QVector<float> outputData(width * height * 4);
     funcs.glBindTexture(GL_TEXTURE_2D, outputTex);
     funcs.glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, outputData.data());
@@ -923,15 +1029,19 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     funcs.glUseProgram(0);
     m_glContext->doneCurrent();
 
+    // Convert back to QImage
     QImage outputImage(width, height, QImage::Format_RGBA8888);
+    outputImage.detach();
     uchar *dstBits = outputImage.bits();
-    for (int i = 0; i < width * height; ++i) {
-        dstBits[i * 4 + 0] = static_cast<uchar>(std::clamp(outputData[i * 4 + 0], 0.0f, 1.0f) * 255.0f + 0.5f);
-        dstBits[i * 4 + 1] = static_cast<uchar>(std::clamp(outputData[i * 4 + 1], 0.0f, 1.0f) * 255.0f + 0.5f);
-        dstBits[i * 4 + 2] = static_cast<uchar>(std::clamp(outputData[i * 4 + 2], 0.0f, 1.0f) * 255.0f + 0.5f);
-        dstBits[i * 4 + 3] = static_cast<uchar>(std::clamp(outputData[i * 4 + 3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    for (int i = 0; i < pixelCount; ++i) {
+        const int idx = i * 4;
+        dstBits[idx + 0] = static_cast<uchar>(std::clamp(outputData[idx + 0], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[idx + 1] = static_cast<uchar>(std::clamp(outputData[idx + 1], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[idx + 2] = static_cast<uchar>(std::clamp(outputData[idx + 2], 0.0f, 1.0f) * 255.0f + 0.5f);
+        dstBits[idx + 3] = static_cast<uchar>(std::clamp(outputData[idx + 3], 0.0f, 1.0f) * 255.0f + 0.5f);
     }
 
+    result.elapsedMs = timer.elapsed();
     result.image = outputImage;
     return result;
 }
