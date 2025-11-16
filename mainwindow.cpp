@@ -1896,7 +1896,7 @@ void MainWindow::processNextPreviewRegeneration()
     }
 
     // Process this image asynchronously, then move to next
-    QtConcurrent::run([this, assetId, originalPath, fileName = asset->fileName]() {
+    QThreadPool::globalInstance()->start([this, assetId, originalPath, fileName = asset->fileName]() {
         QString loadError;
         QImage originalImage = ImageLoader::loadImageWithRawSupport(originalPath, &loadError);
         if (originalImage.isNull()) {
