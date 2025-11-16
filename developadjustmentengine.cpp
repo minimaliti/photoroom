@@ -16,6 +16,7 @@
 #include <QVector>
 #include <QMutexLocker>
 #include <QDebug>
+#include <QScopeGuard>
 
 #include <algorithm>
 #include <array>
@@ -1035,21 +1036,38 @@ QOpenGLContext* DevelopAdjustmentEngine::getOrCreateThreadContext() const
     
     // Check if we already have a context for this thread
     if (m_threadContexts.hasLocalData()) {
-        return m_threadContexts.localData();
+        QOpenGLContext* existing = m_threadContexts.localData();
+        // Validate that the context is still valid
+        if (existing && existing->isValid()) {
+            return existing;
+        }
+        // Context is invalid, clean it up
+        if (existing) {
+            QOffscreenSurface* surface = m_threadSurfaces.localData();
+            if (surface && existing->makeCurrent(surface)) {
+                existing->doneCurrent();
+            }
+            delete existing;
+            if (surface) {
+                delete surface;
+            }
+            m_threadContexts.setLocalData(nullptr);
+            m_threadSurfaces.setLocalData(nullptr);
+        }
     }
     
     // Get the shared context - either from this instance or from static shared state
     QOpenGLContext* shareContext = nullptr;
     QSurfaceFormat format;
     
-    if (m_glContext) {
-        // This instance owns the context
-        shareContext = m_glContext.get();
-        format = m_glContext->format();
-    } else {
-        // This instance is using shared GPU resources
+    {
         QMutexLocker locker(&s_sharedGpuMutex);
-        if (s_gpuInitialized && s_sharedGlContext) {
+        if (m_glContext && m_glContext->isValid()) {
+            // This instance owns the context
+            shareContext = m_glContext.get();
+            format = m_glContext->format();
+        } else if (s_gpuInitialized && s_sharedGlContext && s_sharedGlContext->isValid()) {
+            // This instance is using shared GPU resources
             shareContext = s_sharedGlContext;
             format = s_sharedGlContext->format();
         } else {
@@ -1064,6 +1082,12 @@ QOpenGLContext* DevelopAdjustmentEngine::getOrCreateThreadContext() const
     
     if (!threadContext->create()) {
         qWarning() << "DevelopAdjustmentEngine::getOrCreateThreadContext: Failed to create shared context for thread";
+        delete threadContext;
+        return nullptr;
+    }
+    
+    if (!threadContext->isValid()) {
+        qWarning() << "DevelopAdjustmentEngine::getOrCreateThreadContext: Created context is invalid";
         delete threadContext;
         return nullptr;
     }
@@ -1106,7 +1130,8 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     }
 
     // Validate GPU context - either owned by this instance or shared from another
-    if (m_computeProgram == 0) {
+    GLuint computeProgram = m_computeProgram;
+    if (computeProgram == 0) {
         // Check if using shared GPU resources
         QMutexLocker locker(&s_sharedGpuMutex);
         if (!s_gpuInitialized || !s_sharedGlContext || s_sharedComputeProgram == 0) {
@@ -1114,13 +1139,13 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
             result.errorMessage = QStringLiteral("GPU context not available");
             return result;
         }
-        // Update from shared state if this instance doesn't have it
-        m_computeProgram = s_sharedComputeProgram;
+        // Use shared compute program
+        computeProgram = s_sharedComputeProgram;
     }
 
     // Get or create thread-local shared context for multi-threaded rendering
     QOpenGLContext* threadContext = getOrCreateThreadContext();
-    if (!threadContext) {
+    if (!threadContext || !threadContext->isValid()) {
         result.cancelled = true;
         result.errorMessage = QStringLiteral("Failed to create thread context");
         return result;
@@ -1133,19 +1158,41 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         return result;
     }
 
-    // Acquire GPU context (thread-safe)
-    QMutexLocker locker(&m_glMutex);
+    // Validate shared context is still available before proceeding
+    {
+        QMutexLocker locker(&s_sharedGpuMutex);
+        if (!s_gpuInitialized || !s_sharedGlContext || !s_sharedGlContext->isValid() || s_sharedComputeProgram == 0) {
+            result.cancelled = true;
+            result.errorMessage = QStringLiteral("Shared GPU context no longer available");
+            return result;
+        }
+    }
+
+    // Acquire GPU context (each thread has its own context, so no mutex needed)
+    // But we need to ensure the context is still valid
+    if (!threadContext->isValid()) {
+        result.cancelled = true;
+        result.errorMessage = QStringLiteral("Thread context is no longer valid");
+        return result;
+    }
+    
     if (!threadContext->makeCurrent(threadSurface)) {
         qWarning() << "DevelopAdjustmentEngine::renderWithGpu: Failed to make context current";
         result.cancelled = true;
         result.errorMessage = QStringLiteral("Failed to make GPU context current");
         return result;
     }
+    
+    // RAII guard to ensure doneCurrent() is always called
+    auto contextGuard = qScopeGuard([threadContext]() {
+        if (threadContext && threadContext->isValid()) {
+            threadContext->doneCurrent();
+        }
+    });
 
     // Initialize OpenGL functions
     QOpenGLFunctions_4_3_Core funcs;
     if (!funcs.initializeOpenGLFunctions()) {
-        threadContext->doneCurrent();
         result.cancelled = true;
         result.errorMessage = QStringLiteral("Failed to initialize OpenGL functions");
         return result;
@@ -1166,7 +1213,6 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
 
     // Validate dimensions
     if (width <= 0 || height <= 0 || width > kMaxTextureDimension || height > kMaxTextureDimension) {
-        threadContext->doneCurrent();
         result.cancelled = true;
         result.errorMessage = QStringLiteral("Image dimensions out of range");
         return result;
@@ -1197,7 +1243,6 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
 
     // Check for cancellation before expensive GPU operations
     if (token && token->cancelled.load(std::memory_order_acquire)) {
-        threadContext->doneCurrent();
         result.cancelled = true;
         return result;
     }
@@ -1231,21 +1276,22 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     funcs.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, width, height);
 
     // Activate compute shader program
-    funcs.glUseProgram(m_computeProgram);
+    // Use local variable to avoid accessing member that might be invalid
+    funcs.glUseProgram(computeProgram);
 
     // Build pre-computed adjustments
     const AdjustmentPrecompute pre = buildPrecompute(request.adjustments, width, height);
 
     // Optimized uniform setting with cached locations (could be further optimized with UBOs)
     auto setUniform = [&](const char *name, float value) {
-        const GLint loc = funcs.glGetUniformLocation(m_computeProgram, name);
+        const GLint loc = funcs.glGetUniformLocation(computeProgram, name);
         if (loc >= 0) {
             funcs.glUniform1f(loc, value);
         }
     };
     
     auto setUniformInt = [&](const char *name, int value) {
-        const GLint loc = funcs.glGetUniformLocation(m_computeProgram, name);
+        const GLint loc = funcs.glGetUniformLocation(computeProgram, name);
         if (loc >= 0) {
             funcs.glUniform1i(loc, value);
         }
@@ -1313,7 +1359,6 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     if (token && token->cancelled.load(std::memory_order_acquire)) {
         releaseTextures();
         funcs.glUseProgram(0);
-        threadContext->doneCurrent();
         result.cancelled = true;
         return result;
     }
@@ -1327,7 +1372,7 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
     // Cleanup GPU resources
     releaseTextures();
     funcs.glUseProgram(0);
-    threadContext->doneCurrent();
+    // Note: doneCurrent() is called automatically by contextGuard
 
     // Convert float data back to 8-bit QImage (optimized)
     QImage outputImage(width, height, QImage::Format_RGBA8888);
