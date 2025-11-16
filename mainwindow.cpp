@@ -2943,6 +2943,12 @@ void MainWindow::on_actionExport_triggered()
 
     m_exportInProgress = true;
 
+    // Ensure GPU is initialized before starting export
+    // This must happen on the main thread before worker threads start
+    if (m_adjustmentEngine) {
+        m_adjustmentEngine->initializeGpuOnMainThread();
+    }
+
     QUuid jobId;
     if (m_jobManager) {
         const QString detail = tr("%1 file(s) to %2")

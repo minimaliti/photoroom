@@ -42,6 +42,7 @@ constexpr float kLumaG = 0.7152f;
 constexpr float kLumaB = 0.0722f;
 
 // Optimized compute shader with improved algorithms and performance
+// Split into multiple parts due to MSVC string literal length limit (16KB)
 const char *kComputeShaderSource = R"(#version 430 core
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -112,76 +113,221 @@ float getLuminance(vec3 rgb) {
     return dot(rgb, kLumaWeights);
 }
 
-// Apply tone range adjustment with optimized blending
+// Whites adjustment - controls the very brightest points (similar to highlight recovery but for extreme highlights)
+vec3 applyWhitesAdjust(vec3 value, float amount, float weight) {
+    if (abs(amount) < kEpsilon || weight < kEpsilon) return value;
+    
+    float influence = amount * weight;
+    vec3 recovered = value;
+    
+    if (amount < 0.0) {
+        // Lower whites: compress the extreme highlight range to reveal detail
+        // Use a strong shoulder curve for the very brightest values (> 0.7)
+        vec3 whitesAmount = smoothstep(vec3(0.7), vec3(1.0), value);
+        vec3 compression = vec3(abs(influence)) * whitesAmount;
+        
+        // Strong compression for extreme highlights
+        vec3 shoulderGamma = vec3(1.0) + compression * 2.0;
+        
+        // Only affect values in whites range
+        vec3 normalized = clamp01((value - vec3(0.7)) / vec3(0.3));  // Normalize [0.7, 1.0] to [0, 1]
+        vec3 compressed = pow(normalized, shoulderGamma);
+        
+        // Remap compressed values
+        vec3 shoulderEnd = vec3(0.7) + vec3(0.3) / shoulderGamma;
+        vec3 whitesRecovered = vec3(0.7) + compressed * (shoulderEnd - vec3(0.7));
+        
+        // Blend based on whites mask
+        vec3 blendMask = whitesAmount * vec3(abs(influence) * weight);
+        vec3 whitesRange = step(vec3(0.7), value);
+        recovered = mix(value, whitesRecovered, blendMask * whitesRange);
+    } else {
+        // Raise whites: expand toward pure white while preserving detail
+        vec3 whitesAmount = smoothstep(vec3(0.7), vec3(1.0), value);
+        vec3 expansion = vec3(influence) * whitesAmount;
+        recovered = value + (vec3(1.0) - value) * expansion;
+    }
+    
+    return clamp01(recovered);
+}
+
+// Blacks adjustment - controls the very darkest points (similar to shadow recovery but for extreme shadows)
+vec3 applyBlacksAdjust(vec3 value, float amount, float weight) {
+    if (abs(amount) < kEpsilon || weight < kEpsilon) return value;
+    
+    float influence = amount * weight;
+    vec3 recovered = value;
+    
+    if (amount > 0.0) {
+        // Raise blacks: lift the extreme shadow range to reveal detail
+        // Use a strong toe curve for the very darkest values (< 0.3)
+        vec3 blacksAmount = smoothstep(vec3(0.0), vec3(0.3), vec3(1.0) - value);
+        vec3 expansion = vec3(influence) * blacksAmount;
+        
+        // Strong expansion for extreme shadows
+        vec3 toeGamma = vec3(1.0) + expansion * 1.5;
+        
+        // Only affect values in blacks range
+        vec3 normalized = clamp01(value / vec3(0.3));  // Normalize [0, 0.3] to [0, 1]
+        vec3 expanded = pow(normalized, vec3(1.0) / toeGamma);
+        
+        // Calculate lift amount
+        vec3 liftAmount = vec3(0.3) * expansion * 0.6;
+        vec3 blacksRecovered = expanded * (vec3(0.3) - liftAmount) + liftAmount;
+        
+        // Blend based on blacks mask
+        vec3 blendMask = blacksAmount * vec3(influence * weight);
+        vec3 blacksRange = vec3(1.0) - step(vec3(0.3), value);
+        recovered = mix(value, blacksRecovered, blendMask * blacksRange);
+    } else {
+        // Lower blacks: compress toward pure black while preserving detail
+        vec3 blacksAmount = smoothstep(vec3(0.0), vec3(0.3), vec3(1.0) - value);
+        vec3 compression = vec3(abs(influence)) * blacksAmount;
+        
+        // Use power curve for compression
+        vec3 compressGamma = vec3(1.0) + compression * 1.5;
+        vec3 blacksRange = vec3(1.0) - step(vec3(0.3), value);
+        vec3 compressed = pow(clamp01(value / vec3(0.3)), compressGamma) * vec3(0.3);
+        recovered = mix(value, compressed, blacksAmount * vec3(abs(influence) * weight) * blacksRange);
+    }
+    
+    return clamp01(recovered);
+}
+
+// Apply tone range adjustment with optimized blending (for tone curve adjustments)
+// Used for Lights and Darks adjustments - preserves detail while adjusting tone
 float applyRange(float value, float amount, float weight) {
     if (abs(amount) < kEpsilon || weight < kEpsilon) return value;
     float influence = amount * weight;
-    return (influence > 0.0) 
-        ? value + (1.0 - value) * influence
-        : value * (1.0 + influence);
+    
+    // Use curves that preserve detail
+    if (influence > 0.0) {
+        // Brighten: gentle expansion that preserves highlights
+        float expansion = influence * 0.7;
+        // Scale up values with more effect on mid-tones, less on extremes
+        float brightened = value * (1.0 + expansion) + (1.0 - value) * expansion * 0.4;
+        return clamp01(brightened);
+    } else {
+        // Darken: gentle compression that preserves shadows
+        float compression = abs(influence) * 0.5;
+        // Use a power curve with limited compression to preserve detail
+        float compressionGamma = 1.0 + compression;
+        // Ensure gamma doesn't get too high to avoid crushing
+        compressionGamma = min(compressionGamma, 2.0);
+        float compressed = pow(clamp01(value), compressionGamma);
+        // Mix with original to preserve detail
+        return clamp01(mix(value, compressed, abs(influence) * weight * 0.8));
+    }
 }
 
 // ============================================================================
 // Tone Adjustment Functions
 // ============================================================================
 
-// Improved highlight adjustment with better color preservation
+// Highlight recovery using proper tone curve - recovers detail in overexposed areas
 vec3 applyHighlightAdjust(vec3 value, float amount, float weight, float luminance) {
     if (abs(amount) < kEpsilon || weight < kEpsilon) return value;
     
-    float maxChannel = max(value.r, max(value.g, value.b));
-    
-    // Adaptive highlight adjustment based on luminance distribution
-    float highlightMask = smoothstep01(0.45, 0.95, luminance);
+    // Calculate highlight mask - stronger for bright areas
+    float highlightMask = smoothstep01(0.40, 0.90, luminance);
     float influence = amount * weight * highlightMask;
     
     if (amount < 0.0) {
-        // Darken highlights with better color preservation
-        // Use power curve for natural compression
-        float compressionPower = 1.0 + abs(influence) * 2.0;
-        vec3 compressed = pow(value, vec3(compressionPower));
+        // Recover highlights: compress highlight range to reveal detail
+        // Use a shoulder curve that compresses highlights while preserving mid-tones
         
-        // Additional compression for very bright values
-        if (maxChannel > 0.7) {
-            float extraCompression = (maxChannel - 0.7) / 0.3;
-            compressed *= 1.0 - (extraCompression * abs(influence) * 0.3);
-        }
+        // Determine highlight amount for each channel (component-wise smoothstep)
+        vec3 highlightAmount = smoothstep(vec3(0.5), vec3(1.0), value);
         
-        return clamp01(mix(value, compressed, abs(influence)));
+        // Calculate compression per channel
+        vec3 compression = vec3(abs(influence)) * highlightAmount;
+        
+        // Calculate shoulder gamma for compression (gamma > 1 compresses)
+        vec3 shoulderGamma = vec3(1.0) + compression * 1.5;
+        
+        // Apply highlight recovery curve per channel
+        // Only affect values above 0.5 (highlight range)
+        vec3 recovered = value;
+        
+        // Calculate shoulder end point for each channel
+        vec3 shoulderEnd = vec3(0.5) + vec3(0.5) / shoulderGamma;
+        
+        // Normalize highlight range [0.5, 1.0] to [0, 1]
+        vec3 normalized = (value - vec3(0.5)) / vec3(0.5);
+        
+        // Apply compression only to highlight portion
+        vec3 compressed = pow(clamp01(normalized), shoulderGamma);
+        
+        // Remap compressed values back to [0.5, shoulderEnd]
+        vec3 highlightRecovered = vec3(0.5) + compressed * (shoulderEnd - vec3(0.5));
+        
+        // Mix original with recovered based on highlight mask and compression amount
+        vec3 blendMask = highlightAmount * vec3(abs(influence) * highlightMask);
+        recovered = mix(value, highlightRecovered, blendMask);
+        
+        // Only apply recovery where values are in highlight range (component-wise step)
+        vec3 highlightRange = step(vec3(0.5), value);
+        recovered = mix(value, recovered, highlightRange);
+        
+        return clamp01(recovered);
     } else {
         // Brighten highlights - push toward white while preserving color
+        float maxChannel = max(value.r, max(value.g, value.b));
         float expansionFactor = smoothstep01(0.5, 1.0, maxChannel);
         vec3 brightened = value + (vec3(1.0) - value) * influence * expansionFactor;
         return clamp01(brightened);
     }
 }
 
-// Improved shadow lift that preserves color and detail
+// Shadow recovery using proper tone curve - reveals detail in underexposed areas
 vec3 applyShadowLift(vec3 value, float amount, float weight, float luminance) {
     if (abs(amount) < kEpsilon || weight < kEpsilon) return value;
     
-    // Shadow mask - affects darker regions more
-    float shadowMask = smoothstep01(0.0, 0.5, 1.0 - luminance);
+    // Shadow mask - stronger for dark areas
+    float shadowMask = smoothstep01(0.0, 0.55, 1.0 - luminance);
     float influence = amount * weight * shadowMask;
     
     if (amount > 0.0) {
-        // Lift shadows - preserve saturation
-        float minChannel = min(value.r, min(value.g, value.b));
-        float maxChannel = max(value.r, max(value.g, value.b));
+        // Recover shadows: expand shadow range to reveal detail
+        // Use a toe curve that lifts shadows while preserving mid-tones
         
-        // Very dark regions - add light with minimal color shift
-        if (maxChannel < kEpsilon) {
-            return clamp01(value + vec3(influence * 0.12));
-        }
+        // Determine shadow amount for each channel (component-wise smoothstep)
+        vec3 shadowAmount = smoothstep(vec3(0.0), vec3(0.5), vec3(1.0) - value);
         
-        // Proportional lift to maintain color ratios
-        float liftFactor = 1.0 + influence * 1.5;
-        vec3 lifted = value * liftFactor;
+        // Calculate expansion per channel
+        vec3 expansion = vec3(influence) * shadowAmount;
         
-        // Preserve color relationships
-        return clamp01(lifted);
+        // Calculate toe gamma for expansion (gamma < 1 on inverted curve expands shadows)
+        // Use inverse gamma: y = x^(1/gamma) expands the lower portion
+        vec3 toeGamma = vec3(1.0) + expansion * 1.2;
+        
+        // Apply shadow recovery curve per channel
+        // Only affect values below 0.5 (shadow range)
+        vec3 recovered = value;
+        
+        // Normalize shadow range [0, 0.5] to [0, 1]
+        vec3 normalized = clamp01(value / vec3(0.5));
+        
+        // Apply expansion using toe curve: pow(x, 1/gamma) expands lower values
+        vec3 expanded = pow(normalized, vec3(1.0) / toeGamma);
+        
+        // Calculate lift amount - remap [0, 0.5] to [lift, 0.5]
+        // More expansion means more lift from 0
+        vec3 liftAmount = vec3(0.5) * expansion * 0.8;
+        vec3 shadowRecovered = expanded * (vec3(0.5) - liftAmount) + liftAmount;
+        
+        // Mix original with recovered based on shadow mask and expansion amount
+        vec3 blendMask = shadowAmount * vec3(influence * shadowMask);
+        recovered = mix(value, shadowRecovered, blendMask);
+        
+        // Only apply recovery where values are in shadow range (component-wise step)
+        // Values <= 0.5 are in shadow range
+        vec3 shadowRange = vec3(1.0) - step(vec3(0.5), value);
+        recovered = mix(value, recovered, shadowRange);
+        
+        return clamp01(recovered);
     } else {
-        // Darken shadows
+        // Darken shadows - compress shadow range
         float darkenPower = 1.0 + abs(influence) * 1.5;
         return clamp01(pow(value, vec3(darkenPower)));
     }
@@ -190,6 +336,8 @@ vec3 applyShadowLift(vec3 value, float amount, float weight, float luminance) {
 // ============================================================================
 // HSL Color Space Functions
 // ============================================================================
+)"
+R"(
 
 // Fast HSL to RGB conversion
 float hueToRgb(float p, float q, float t) {
@@ -272,14 +420,9 @@ vec3 applyToneAdjustments(vec3 value, float luminance) {
     v = applyHighlightAdjust(v, highlights, highlightWeight, luminance);
     v = applyShadowLift(v, shadows, shadowWeight, luminance);
     
-    // Apply whites/blacks per-channel for fine control
-    v.r = applyRange(v.r, whites, whitesWeight);
-    v.g = applyRange(v.g, whites, whitesWeight);
-    v.b = applyRange(v.b, whites, whitesWeight);
-    
-    v.r = applyRange(v.r, blacks, blacksWeight);
-    v.g = applyRange(v.g, blacks, blacksWeight);
-    v.b = applyRange(v.b, blacks, blacksWeight);
+    // Apply whites/blacks with proper tone curves (preserves detail)
+    v = applyWhitesAdjust(v, whites, whitesWeight);
+    v = applyBlacksAdjust(v, blacks, blacksWeight);
     
     // 4. Tone curve adjustments (secondary pass)
     float toneHighlight = smoothstep01(0.50, 0.90, luminance);
@@ -551,12 +694,34 @@ AdjustmentPrecompute buildPrecompute(const DevelopAdjustments &adjustments, int 
 
 } // namespace
 
+// Static shared GPU state - allows worker threads to use GPU initialized by main thread
+namespace {
+    QOpenGLContext* s_sharedGlContext = nullptr;
+    QOffscreenSurface* s_sharedOffscreenSurface = nullptr;
+    GLuint s_sharedComputeProgram = 0;
+    bool s_gpuInitialized = false;
+    QMutex s_sharedGpuMutex;
+}
+
 DevelopAdjustmentEngine::DevelopAdjustmentEngine(QObject *parent)
     : QObject(parent)
 {
     qDebug() << "DevelopAdjustmentEngine::DevelopAdjustmentEngine: Constructor called from thread:"
              << QThread::currentThread() << "isMainThread:"
              << (QThread::currentThread() == QCoreApplication::instance()->thread());
+    
+    // Check if GPU was already initialized by another instance
+    QMutexLocker locker(&s_sharedGpuMutex);
+    if (s_gpuInitialized && s_sharedGlContext && s_sharedOffscreenSurface) {
+        // Use the shared GPU resources - we'll reference them via getOrCreateThreadContext()
+        // Don't take ownership, just mark that GPU is available and we'll use shared context
+        m_computeProgram = s_sharedComputeProgram;
+        m_gpuInitialized = true;
+        m_gpuAvailable = true;
+        // Store references (won't be deleted - shared context handles that)
+        // We'll access the actual context via getOrCreateThreadContext() in renderWithGpu()
+        qDebug() << "DevelopAdjustmentEngine::DevelopAdjustmentEngine: Using shared GPU context from another instance";
+    }
 }
 
 void DevelopAdjustmentEngine::initializeGpuOnMainThread()
@@ -657,10 +822,21 @@ bool DevelopAdjustmentEngine::initializeGpu()
     
     // QOffscreenSurface must be created on the main thread
     if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        // Check if GPU was already initialized by another instance (on main thread)
+        QMutexLocker locker(&s_sharedGpuMutex);
+        if (s_gpuInitialized && s_sharedGlContext && s_sharedOffscreenSurface) {
+            // Use the shared GPU resources from main thread - reference without taking ownership
+            // We'll access the actual context via getOrCreateThreadContext() in renderWithGpu()
+            m_computeProgram = s_sharedComputeProgram;
+            m_gpuInitialized = true;
+            m_gpuAvailable = true;
+            qDebug() << "DevelopAdjustmentEngine::initializeGpu: Using shared GPU context on worker thread";
+            return true;
+        }
+        
         qWarning() << "DevelopAdjustmentEngine::initializeGpu: Called from non-main thread! QOffscreenSurface creation will fail.";
-        qWarning() << "DevelopAdjustmentEngine::initializeGpu: This should be called via initializeGpuOnMainThread() first.";
-        m_gpuInitialized = true; // Mark as attempted to avoid repeated failures
-        m_gpuAvailable = false;
+        qWarning() << "DevelopAdjustmentEngine::initializeGpu: GPU must be initialized on main thread first via initializeGpuOnMainThread().";
+        // Don't mark as initialized - allow future attempts if GPU gets initialized
         return false;
     }
 
@@ -837,13 +1013,23 @@ bool DevelopAdjustmentEngine::initializeGpu()
     m_offscreenSurface = std::move(surface);
     m_glContext->doneCurrent();
     m_gpuAvailable = true;
+    
+    // Share GPU resources with other engine instances via static variables
+    {
+        QMutexLocker locker(&s_sharedGpuMutex);
+        s_sharedGlContext = m_glContext.get();
+        s_sharedOffscreenSurface = m_offscreenSurface.get();
+        s_sharedComputeProgram = m_computeProgram;
+        s_gpuInitialized = true;
+    }
+    
     qDebug() << "DevelopAdjustmentEngine::initializeGpu: GPU initialization complete, GPU available:" << m_gpuAvailable;
     return true;
 }
 
 QOpenGLContext* DevelopAdjustmentEngine::getOrCreateThreadContext() const
 {
-    if (!m_glContext || !m_gpuAvailable) {
+    if (!m_gpuAvailable) {
         return nullptr;
     }
     
@@ -852,10 +1038,29 @@ QOpenGLContext* DevelopAdjustmentEngine::getOrCreateThreadContext() const
         return m_threadContexts.localData();
     }
     
+    // Get the shared context - either from this instance or from static shared state
+    QOpenGLContext* shareContext = nullptr;
+    QSurfaceFormat format;
+    
+    if (m_glContext) {
+        // This instance owns the context
+        shareContext = m_glContext.get();
+        format = m_glContext->format();
+    } else {
+        // This instance is using shared GPU resources
+        QMutexLocker locker(&s_sharedGpuMutex);
+        if (s_gpuInitialized && s_sharedGlContext) {
+            shareContext = s_sharedGlContext;
+            format = s_sharedGlContext->format();
+        } else {
+            return nullptr;
+        }
+    }
+    
     // Create a new shared context for this thread
     QOpenGLContext* threadContext = new QOpenGLContext();
-    threadContext->setFormat(m_glContext->format());
-    threadContext->setShareContext(m_glContext.get());
+    threadContext->setFormat(format);
+    threadContext->setShareContext(shareContext);
     
     if (!threadContext->create()) {
         qWarning() << "DevelopAdjustmentEngine::getOrCreateThreadContext: Failed to create shared context for thread";
@@ -865,7 +1070,7 @@ QOpenGLContext* DevelopAdjustmentEngine::getOrCreateThreadContext() const
     
     // Create a surface for this thread
     QOffscreenSurface* threadSurface = new QOffscreenSurface();
-    threadSurface->setFormat(m_glContext->format());
+    threadSurface->setFormat(format);
     threadSurface->create();
     
     if (!threadSurface->isValid()) {
@@ -900,11 +1105,17 @@ DevelopAdjustmentRenderResult DevelopAdjustmentEngine::renderWithGpu(const Devel
         return result;
     }
 
-    // Validate GPU context
-    if (!m_glContext || !m_offscreenSurface || m_computeProgram == 0) {
-        result.cancelled = true;
-        result.errorMessage = QStringLiteral("GPU context not available");
-        return result;
+    // Validate GPU context - either owned by this instance or shared from another
+    if (m_computeProgram == 0) {
+        // Check if using shared GPU resources
+        QMutexLocker locker(&s_sharedGpuMutex);
+        if (!s_gpuInitialized || !s_sharedGlContext || s_sharedComputeProgram == 0) {
+            result.cancelled = true;
+            result.errorMessage = QStringLiteral("GPU context not available");
+            return result;
+        }
+        // Update from shared state if this instance doesn't have it
+        m_computeProgram = s_sharedComputeProgram;
     }
 
     // Get or create thread-local shared context for multi-threaded rendering
