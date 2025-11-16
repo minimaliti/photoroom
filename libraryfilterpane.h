@@ -19,6 +19,7 @@ public:
     void setAvailableCameraMakes(const QStringList &makes);
     void setAvailableTags(const QStringList &tags);
     void setIsoRange(int min, int max);
+    void clearFilters();
 
 signals:
     void filterChanged(const FilterOptions &options);

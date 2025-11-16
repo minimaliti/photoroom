@@ -200,6 +200,11 @@ void LibraryFilterPane::onTagFilterChanged()
     emitFilterChanged();
 }
 
+void LibraryFilterPane::clearFilters()
+{
+    onClearFilters();
+}
+
 void LibraryFilterPane::onClearFilters()
 {
     if (m_sortCombo) {

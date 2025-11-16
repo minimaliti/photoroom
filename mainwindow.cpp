@@ -878,6 +878,10 @@ void MainWindow::bindLibrarySignals()
         if (ui->actionImport) {
             ui->actionImport->setEnabled(true);
         }
+        // Clear filters when library is loaded
+        if (m_libraryFilterPane) {
+            m_libraryFilterPane->clearFilters();
+        }
         showStatusMessage(tr("Opened library: %1").arg(QDir(path).dirName()), 4000);
         refreshLibraryView();
     });
