@@ -1050,9 +1050,6 @@ void MainWindow::updateFilterPaneOptions()
     // Update ISO range
     int minIso = cache->getMinIso();
     int maxIso = cache->getMaxIso();
-    if (minIso > 0 && maxIso > 0) {
-        m_libraryFilterPane->setIsoRange(minIso, maxIso);
-    }
 
     // Update available tags
     QStringList tags = cache->getAllTags();

@@ -18,7 +18,6 @@ public:
     FilterOptions currentFilterOptions() const;
     void setAvailableCameraMakes(const QStringList &makes);
     void setAvailableTags(const QStringList &tags);
-    void setIsoRange(int min, int max);
     void clearFilters();
 
 signals:
@@ -26,8 +25,8 @@ signals:
 
 private slots:
     void onSortOrderChanged(int index);
-    void onIsoMinChanged(int value);
-    void onIsoMaxChanged(int value);
+    void onIsoMinChanged(const QString &text);
+    void onIsoMaxChanged(const QString &text);
     void onCameraMakeChanged(const QString &text);
     void onTagFilterChanged();
     void onClearFilters();
@@ -37,8 +36,8 @@ private:
     void emitFilterChanged();
 
     QComboBox *m_sortCombo = nullptr;
-    QSpinBox *m_isoMinSpin = nullptr;
-    QSpinBox *m_isoMaxSpin = nullptr;
+    QComboBox *m_isoMinCombo = nullptr;
+    QComboBox *m_isoMaxCombo = nullptr;
     QComboBox *m_cameraMakeCombo = nullptr;
     QLineEdit *m_tagFilterEdit = nullptr;
     QPushButton *m_clearButton = nullptr;

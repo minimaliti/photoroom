@@ -40,24 +40,24 @@ void LibraryFilterPane::setupUI()
     auto *isoLabel = new QLabel(tr("ISO:"), this);
     mainLayout->addWidget(isoLabel);
 
-    m_isoMinSpin = new QSpinBox(this);
-    m_isoMinSpin->setMinimum(0);
-    m_isoMinSpin->setMaximum(1000000);
-    m_isoMinSpin->setSpecialValueText(tr("Min"));
-    m_isoMinSpin->setValue(0);
-    connect(m_isoMinSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &LibraryFilterPane::onIsoMinChanged);
-    mainLayout->addWidget(m_isoMinSpin);
+    m_isoMinCombo = new QComboBox(this);
+    m_isoMaxCombo = new QComboBox(this);
+
+    const QStringList isoValues = {"Any", "50", "100", "200", "400", "800", "1600", "3200", "6400", "12800", "25600"};
+
+    m_isoMinCombo->addItems(isoValues);
+    m_isoMinCombo->setItemData(0, 0); // "Any"
+    m_isoMaxCombo->addItems(isoValues);
+    m_isoMaxCombo->setItemData(0, 0); // "Any"
+
+    connect(m_isoMinCombo, &QComboBox::currentTextChanged, this, &LibraryFilterPane::onIsoMinChanged);
+    mainLayout->addWidget(m_isoMinCombo);
 
     auto *isoToLabel = new QLabel(tr("to"), this);
     mainLayout->addWidget(isoToLabel);
 
-    m_isoMaxSpin = new QSpinBox(this);
-    m_isoMaxSpin->setMinimum(0);
-    m_isoMaxSpin->setMaximum(1000000);
-    m_isoMaxSpin->setSpecialValueText(tr("Max"));
-    m_isoMaxSpin->setValue(0);
-    connect(m_isoMaxSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &LibraryFilterPane::onIsoMaxChanged);
-    mainLayout->addWidget(m_isoMaxSpin);
+    connect(m_isoMaxCombo, &QComboBox::currentTextChanged, this, &LibraryFilterPane::onIsoMaxChanged);
+    mainLayout->addWidget(m_isoMaxCombo);
 
     mainLayout->addSpacing(16);
 
@@ -125,18 +125,6 @@ void LibraryFilterPane::setAvailableTags(const QStringList &tags)
     // Could be used for autocomplete or tag selection widget in the future
 }
 
-void LibraryFilterPane::setIsoRange(int min, int max)
-{
-    if (m_isoMinSpin) {
-        m_isoMinSpin->setMinimum(min);
-        m_isoMinSpin->setMaximum(max);
-    }
-    if (m_isoMaxSpin) {
-        m_isoMaxSpin->setMinimum(min);
-        m_isoMaxSpin->setMaximum(max);
-    }
-}
-
 void LibraryFilterPane::onSortOrderChanged(int index)
 {
     if (index < 0 || !m_sortCombo) {
@@ -150,20 +138,40 @@ void LibraryFilterPane::onSortOrderChanged(int index)
     }
 }
 
-void LibraryFilterPane::onIsoMinChanged(int value)
+void LibraryFilterPane::onIsoMinChanged(const QString &text)
 {
+    bool ok;
+    int value = text.toInt(&ok);
+    if (!ok) { // "Any"
+        value = 0;
+    }
+
     m_currentOptions.isoMin = value;
-    if (m_isoMaxSpin && value > 0 && m_isoMaxSpin->value() > 0 && value > m_isoMaxSpin->value()) {
-        m_isoMaxSpin->setValue(value);
+
+    if (m_isoMaxCombo && value > 0) {
+        int maxVal = m_isoMaxCombo->currentText().toInt();
+        if (maxVal > 0 && value > maxVal) {
+            m_isoMaxCombo->setCurrentText(text);
+        }
     }
     emitFilterChanged();
 }
 
-void LibraryFilterPane::onIsoMaxChanged(int value)
+void LibraryFilterPane::onIsoMaxChanged(const QString &text)
 {
+    bool ok;
+    int value = text.toInt(&ok);
+    if (!ok) { // "Any"
+        value = 0;
+    }
+
     m_currentOptions.isoMax = value;
-    if (m_isoMinSpin && value > 0 && m_isoMinSpin->value() > 0 && value < m_isoMinSpin->value()) {
-        m_isoMinSpin->setValue(value);
+
+    if (m_isoMinCombo && value > 0) {
+        int minVal = m_isoMinCombo->currentText().toInt();
+        if (minVal > 0 && value < minVal) {
+            m_isoMinCombo->setCurrentText(text);
+        }
     }
     emitFilterChanged();
 }
@@ -210,11 +218,11 @@ void LibraryFilterPane::onClearFilters()
     if (m_sortCombo) {
         m_sortCombo->setCurrentIndex(0); // Date desc
     }
-    if (m_isoMinSpin) {
-        m_isoMinSpin->setValue(0);
+    if (m_isoMinCombo) {
+        m_isoMinCombo->setCurrentIndex(0);
     }
-    if (m_isoMaxSpin) {
-        m_isoMaxSpin->setValue(0);
+    if (m_isoMaxCombo) {
+        m_isoMaxCombo->setCurrentIndex(0);
     }
     if (m_cameraMakeCombo) {
         m_cameraMakeCombo->setCurrentIndex(0); // All
