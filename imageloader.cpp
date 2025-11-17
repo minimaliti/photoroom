@@ -111,7 +111,7 @@ QThreadPool *preloadThreadPool()
 }
 
 // --- Utility Lambdas for Reuse ---
-auto localeStr = [](double val, int prec = 0) { return QLocale().toString(val, 'f', prec); };
+auto localeStr = [](double val, int prec = 0) { return QLocale().toString(val, 'f', prec, QLocale::OmitGroupSeparator); };
 
 QString formatIso(double iso) {
     return (iso > 0.0) ? QObject::tr("ISO %1").arg(localeStr(std::round(iso))) : QString();
