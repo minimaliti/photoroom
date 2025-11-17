@@ -86,6 +86,7 @@ private slots:
     void handleLibraryError(const QString &message);
     void handleJobListChanged();
     void handleFolderDropped(const QString &folderPath);
+    void handleAssetsQueried(const QVector<LibraryAsset> &assets);
 
 private:
     Ui::MainWindow *ui;

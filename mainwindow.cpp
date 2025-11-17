@@ -906,6 +906,7 @@ void MainWindow::bindLibrarySignals()
     connect(m_libraryManager, &LibraryManager::importProgress, this, &MainWindow::handleImportProgress);
     connect(m_libraryManager, &LibraryManager::importCompleted, this, &MainWindow::handleImportCompleted);
     connect(m_libraryManager, &LibraryManager::errorOccurred, this, &MainWindow::handleLibraryError);
+    connect(m_libraryManager, &LibraryManager::assetsQueried, this, &MainWindow::handleAssetsQueried);
 }
 
 void MainWindow::setupJobSystem()
@@ -1068,7 +1069,20 @@ void MainWindow::refreshLibraryView(const FilterOptions &filterOptions)
         return;
     }
 
-    m_assets = m_libraryManager->assets(filterOptions);
+    // Show a loading state if desired
+    // m_libraryGridView->showLoadingIndicator();
+
+    // Asynchronously request the assets instead of getting them directly
+    m_libraryManager->requestAssets(filterOptions);
+}
+
+void MainWindow::handleAssetsQueried(const QVector<LibraryAsset> &queriedAssets)
+{
+    if (!m_libraryGridView) {
+        return;
+    }
+
+    m_assets = queriedAssets;
 
     QVector<LibraryGridItem> items;
     items.reserve(m_assets.size());
@@ -3160,7 +3174,15 @@ void MainWindow::on_actionImport_triggered()
         m_activeImportTotal = files.size();
     }
 
-    m_libraryManager->importFiles(files);
+    // Use QPointer for thread-safe access to the library manager
+    QPointer<LibraryManager> manager = m_libraryManager;
+    QtConcurrent::run([manager, files]() {
+        if (!manager) {
+            return;
+        }
+        // This entire function now runs on a background thread
+        manager->importFiles(files);
+    });
 }
 
 namespace {
@@ -3233,5 +3255,13 @@ void MainWindow::handleFolderDropped(const QString &folderPath)
         m_activeImportTotal = filesToImport.size();
     }
 
-    m_libraryManager->importFiles(filesToImport);
+    // Use QPointer for thread-safe access to the library manager
+    QPointer<LibraryManager> manager = m_libraryManager;
+    QtConcurrent::run([manager, filesToImport]() {
+        if (!manager) {
+            return;
+        }
+        // This entire function now runs on a background thread
+        manager->importFiles(filesToImport);
+    });
 }

@@ -4,9 +4,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutexLocker>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>
+#include <QThread>
 #include <QUuid>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -76,10 +78,13 @@ bool MetadataCache::openCache(const QString &libraryPath, QString *errorMessage)
 
 void MetadataCache::closeCache()
 {
+    QMutexLocker locker(&m_mutex);
     if (!m_connectionName.isEmpty()) {
         if (m_database.isOpen()) {
             m_database.close();
         }
+        // Wait a bit to ensure all queries finish
+        QThread::msleep(10);
         QSqlDatabase::removeDatabase(m_connectionName);
         m_connectionName.clear();
     }
@@ -149,6 +154,7 @@ bool MetadataCache::initializeSchema(QString *errorMessage)
 
 bool MetadataCache::storeMetadata(qint64 assetId, const AssetMetadata &metadata, QString *errorMessage)
 {
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache() || assetId <= 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Cannot store metadata without an open cache or valid asset ID");
@@ -186,6 +192,7 @@ bool MetadataCache::storeMetadata(qint64 assetId, const AssetMetadata &metadata,
 
 bool MetadataCache::updateMetadata(qint64 assetId, const AssetMetadata &metadata, QString *errorMessage)
 {
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache() || assetId <= 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Cannot update metadata without an open cache or valid asset ID");
@@ -232,6 +239,7 @@ AssetMetadata MetadataCache::loadMetadata(qint64 assetId) const
     AssetMetadata metadata;
     metadata.assetId = assetId;
 
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache() || assetId <= 0) {
         return metadata;
     }
@@ -270,6 +278,7 @@ AssetMetadata MetadataCache::loadMetadata(qint64 assetId) const
 
 bool MetadataCache::deleteMetadata(qint64 assetId, QString *errorMessage)
 {
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache() || assetId <= 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Cannot delete metadata without an open cache or valid asset ID");
@@ -295,6 +304,7 @@ QVector<qint64> MetadataCache::filterAssets(const FilterOptions &options) const
 {
     QVector<qint64> result;
 
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache()) {
         return result;
     }
@@ -305,22 +315,42 @@ QVector<qint64> MetadataCache::filterAssets(const FilterOptions &options) const
     // ISO range filter
     if (options.isoMin > 0 || options.isoMax > 0) {
         if (options.isoMin > 0 && options.isoMax > 0) {
-            conditions.append(QStringLiteral("iso >= ? AND iso <= ?"));
+            // Both min and max specified: range filter
+            conditions.append(QStringLiteral("CAST(iso AS INTEGER) >= ? AND CAST(iso AS INTEGER) <= ?"));
             bindValues.append(options.isoMin);
             bindValues.append(options.isoMax);
         } else if (options.isoMin > 0) {
-            conditions.append(QStringLiteral("iso >= ?"));
+            // Only min specified: >= filter
+            conditions.append(QStringLiteral("CAST(iso AS INTEGER) >= ?"));
             bindValues.append(options.isoMin);
         } else if (options.isoMax > 0) {
-            conditions.append(QStringLiteral("iso <= ?"));
+            // Only max specified (min is "Any"): <= filter, but exclude ISO 0 (no data)
+            conditions.append(QStringLiteral("CAST(iso AS INTEGER) > 0 AND CAST(iso AS INTEGER) <= ?"));
             bindValues.append(options.isoMax);
         }
     }
 
-    // Camera make filter
+    // Camera make/model filter
+    // The filter value is in format "Make Model" or just "Make" or "Model"
     if (!options.cameraMake.isEmpty()) {
-        conditions.append(QStringLiteral("camera_make = ?"));
-        bindValues.append(options.cameraMake);
+        // Try to match the combined string against make+model or individual fields
+        // Split the filter value to see if it contains both make and model
+        QStringList parts = options.cameraMake.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (parts.size() >= 2) {
+            // Assume first part is make, rest is model
+            QString filterMake = parts.first();
+            QString filterModel = parts.mid(1).join(QLatin1Char(' '));
+            conditions.append(QStringLiteral("(camera_make = ? AND camera_model = ?) OR (camera_make || ' ' || camera_model = ?)"));
+            bindValues.append(filterMake);
+            bindValues.append(filterModel);
+            bindValues.append(options.cameraMake);
+        } else {
+            // Single value - match against either make or model
+            conditions.append(QStringLiteral("(camera_make = ? OR camera_model = ? OR camera_make || ' ' || camera_model = ?)"));
+            bindValues.append(options.cameraMake);
+            bindValues.append(options.cameraMake);
+            bindValues.append(options.cameraMake);
+        }
     }
 
     // Tags filter
@@ -351,13 +381,13 @@ QVector<qint64> MetadataCache::filterAssets(const FilterOptions &options) const
         orderBy = QStringLiteral("ORDER BY CASE WHEN capture_date IS NULL OR capture_date = '' THEN 1 ELSE 0 END ASC, capture_date ASC, asset_id ASC");
         break;
     case FilterOptions::SortByIsoDesc:
-        orderBy = QStringLiteral("ORDER BY iso DESC, asset_id DESC");
+        orderBy = QStringLiteral("ORDER BY CAST(iso AS INTEGER) DESC, asset_id DESC");
         break;
     case FilterOptions::SortByIsoAsc:
-        orderBy = QStringLiteral("ORDER BY iso ASC, asset_id ASC");
+        orderBy = QStringLiteral("ORDER BY CAST(iso AS INTEGER) ASC, asset_id ASC");
         break;
     case FilterOptions::SortByCameraMake:
-        orderBy = QStringLiteral("ORDER BY camera_make ASC, capture_date DESC");
+        orderBy = QStringLiteral("ORDER BY camera_make ASC, camera_model ASC, capture_date DESC");
         break;
     case FilterOptions::SortByFileName:
         // This would need to join with assets table, but for now we'll sort by asset_id
@@ -388,21 +418,35 @@ QVector<qint64> MetadataCache::filterAssets(const FilterOptions &options) const
 QStringList MetadataCache::getAllCameraMakes() const
 {
     QStringList result;
+    QSet<QString> cameraSet;
 
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache()) {
         return result;
     }
 
     QSqlQuery query(m_database);
-    if (!query.exec(QStringLiteral("SELECT DISTINCT camera_make FROM asset_metadata WHERE camera_make IS NOT NULL AND camera_make != '' ORDER BY camera_make"))) {
+    if (!query.exec(QStringLiteral("SELECT DISTINCT camera_make, camera_model FROM asset_metadata WHERE (camera_make IS NOT NULL AND camera_make != '') OR (camera_model IS NOT NULL AND camera_model != '') ORDER BY camera_make, camera_model"))) {
         qWarning() << "Failed to get camera makes:" << query.lastError();
         return result;
     }
 
     while (query.next()) {
         const QString make = query.value(0).toString().trimmed();
-        if (!make.isEmpty()) {
-            result.append(make);
+        const QString model = query.value(1).toString().trimmed();
+        
+        QString camera;
+        if (!make.isEmpty() && !model.isEmpty()) {
+            camera = QStringLiteral("%1 %2").arg(make, model);
+        } else if (!make.isEmpty()) {
+            camera = make;
+        } else if (!model.isEmpty()) {
+            camera = model;
+        }
+        
+        if (!camera.isEmpty() && !cameraSet.contains(camera)) {
+            cameraSet.insert(camera);
+            result.append(camera);
         }
     }
 
@@ -414,6 +458,7 @@ QStringList MetadataCache::getAllTags() const
     QStringList result;
     QSet<QString> tagSet;
 
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache()) {
         return result;
     }
@@ -449,6 +494,7 @@ QStringList MetadataCache::getAllTags() const
 
 int MetadataCache::getMinIso() const
 {
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache()) {
         return 0;
     }
@@ -467,6 +513,7 @@ int MetadataCache::getMinIso() const
 
 int MetadataCache::getMaxIso() const
 {
+    QMutexLocker locker(&m_mutex);
     if (!hasOpenCache()) {
         return 0;
     }
@@ -499,6 +546,7 @@ bool MetadataCache::addTag(qint64 assetId, const QString &tag, QString *errorMes
 
 bool MetadataCache::removeTag(qint64 assetId, const QString &tag, QString *errorMessage)
 {
+    QMutexLocker locker(&m_mutex);
     AssetMetadata metadata = loadMetadata(assetId);
     if (metadata.assetId != assetId) {
         return true; // No metadata exists, nothing to remove
@@ -510,6 +558,7 @@ bool MetadataCache::removeTag(qint64 assetId, const QString &tag, QString *error
 
 bool MetadataCache::setTags(qint64 assetId, const QStringList &tags, QString *errorMessage)
 {
+    QMutexLocker locker(&m_mutex);
     AssetMetadata metadata = loadMetadata(assetId);
     if (metadata.assetId != assetId) {
         metadata.assetId = assetId;

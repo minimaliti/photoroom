@@ -11,6 +11,7 @@
 #include <QUuid>
 #include <QFutureWatcher>
 #include <QFuture>
+#include <QPointer>
 
 #include "developtypes.h"
 #include "metadatacache.h"
@@ -26,6 +27,9 @@ struct LibraryAsset
     int width = 0;
     int height = 0;
 };
+
+Q_DECLARE_METATYPE(LibraryAsset)
+Q_DECLARE_METATYPE(QVector<LibraryAsset>)
 
 class PreviewGenerator;
 class JobManager;
@@ -67,6 +71,16 @@ signals:
     void importProgress(int imported, int total);
     void importCompleted();
     void errorOccurred(const QString &message);
+    void assetsQueried(const QVector<LibraryAsset> &assets);
+
+public slots:
+    void requestAssets(const FilterOptions &filterOptions);
+
+private slots:
+    void doEnqueueMetadataExtraction(qint64 assetId, const QString &sourceFile);
+    void doEnqueuePreviewGeneration(const LibraryAsset &asset);
+    void doStartBatchPreviewJob(int total);
+    void doStartBatchMetadataJob(int total);
 
 private:
     bool ensurePhotoNumberColumn(QString *errorMessage = nullptr);

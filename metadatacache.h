@@ -7,6 +7,7 @@
 #include <QStringList>
 #include <QDateTime>
 #include <QVector>
+#include <QRecursiveMutex>
 
 struct AssetMetadata
 {
@@ -75,6 +76,7 @@ private:
     QString m_cachePath;
     QString m_connectionName;
     QSqlDatabase m_database;
+    mutable QRecursiveMutex m_mutex;
 };
 
 #endif // METADATACACHE_H

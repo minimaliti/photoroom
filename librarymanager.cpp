@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLocale>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
@@ -44,6 +45,9 @@ LibraryManager::LibraryManager(QObject *parent)
     , m_previewGenerator(new PreviewGenerator(this))
     , m_metadataCache(new MetadataCache(this))
 {
+    // Register LibraryAsset for use with queued connections
+    qRegisterMetaType<LibraryAsset>("LibraryAsset");
+    qRegisterMetaType<QVector<LibraryAsset>>("QVector<LibraryAsset>");
     connect(m_previewGenerator, &PreviewGenerator::previewReady, this, [this](const PreviewResult &result) {
         if (!hasOpenLibrary()) {
             return;
@@ -436,6 +440,221 @@ QVector<LibraryAsset> LibraryManager::assets(const FilterOptions &filterOptions)
     return result;
 }
 
+void LibraryManager::requestAssets(const FilterOptions &filterOptions)
+{
+    // Capture necessary data before entering the lambda
+    if (!hasOpenLibrary()) {
+        emit assetsQueried(QVector<LibraryAsset>());
+        return;
+    }
+
+    const QString libraryPath = m_libraryPath;
+    const QString connectionName = m_connectionName;
+    const QString dbPath = QDir(libraryPath).filePath(QString::fromLatin1(kDatabaseFileName));
+    
+    // Capture metadata cache state - we'll check if it's available and use it
+    // Note: We can't safely access QObject from background thread, so we'll
+    // capture the cache path and open it in the background thread if needed
+    bool hasMetadataCache = (m_metadataCache && m_metadataCache->hasOpenCache());
+    QString metadataCachePath;
+    if (hasMetadataCache) {
+        // We'll need to open the cache in the background thread
+        metadataCachePath = libraryPath;
+    }
+
+    // Use QPointer for thread-safe access in the lambda
+    QPointer<LibraryManager> self(this);
+
+    QtConcurrent::run([self, filterOptions, libraryPath, dbPath, connectionName, hasMetadataCache, metadataCachePath]() {
+        if (!self) {
+            return;
+        }
+
+        // Create a thread-local database connection
+        const QString threadConnectionName = QStringLiteral("%1_query_%2").arg(connectionName).arg(QUuid::createUuid().toString(QUuid::Id128));
+        QSqlDatabase threadDb = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), threadConnectionName);
+        threadDb.setDatabaseName(dbPath);
+        
+        if (!threadDb.open()) {
+            qWarning() << "Failed to open thread-local database connection for query:" << threadDb.lastError();
+            QSqlDatabase::removeDatabase(threadConnectionName);
+            emit self->assetsQueried(QVector<LibraryAsset>());
+            return;
+        }
+
+        QVector<LibraryAsset> result;
+
+        // Open metadata cache in background thread if needed
+        MetadataCache *threadCache = nullptr;
+        if (hasMetadataCache) {
+            threadCache = new MetadataCache();
+            QString cacheError;
+            if (!threadCache->openCache(metadataCachePath, &cacheError)) {
+                qWarning() << "Failed to open metadata cache in background thread:" << cacheError;
+                delete threadCache;
+                threadCache = nullptr;
+            }
+        }
+
+        // Perform the query (similar logic to assets() method)
+        if (threadCache && threadCache->hasOpenCache()) {
+            // Check if any filters are actually applied (not just default sort)
+            bool hasActiveFilters = (filterOptions.isoMin > 0 || filterOptions.isoMax > 0 || 
+                                     !filterOptions.cameraMake.isEmpty() || !filterOptions.tags.isEmpty());
+            
+            QVector<qint64> filteredIds = threadCache->filterAssets(filterOptions);
+            
+            // Only return empty if filters were actively applied and no results found
+            if (hasActiveFilters && filteredIds.isEmpty()) {
+                // Filters applied but no results
+                delete threadCache;
+                threadDb.close();
+                QSqlDatabase::removeDatabase(threadConnectionName);
+                emit self->assetsQueried(result);
+                return;
+            }
+            
+            // Build query with filtered IDs or all assets
+            QString querySql;
+            if (!hasActiveFilters && filteredIds.isEmpty()) {
+                // No filters and no metadata yet - query all assets from main database
+                querySql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets");
+            } else if (!filteredIds.isEmpty()) {
+                // Use filtered/sorted results from metadata cache
+                QStringList idPlaceholders;
+                for (int i = 0; i < filteredIds.size(); ++i) {
+                    idPlaceholders.append(QStringLiteral("?"));
+                }
+                querySql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets WHERE id IN (%1)").arg(idPlaceholders.join(QStringLiteral(", ")));
+            } else {
+                // Has filters but no results - return empty
+                delete threadCache;
+                threadDb.close();
+                QSqlDatabase::removeDatabase(threadConnectionName);
+                emit self->assetsQueried(result);
+                return;
+            }
+
+            // Apply sorting if not handled by metadata cache
+            QString orderBy;
+            if (filteredIds.isEmpty()) {
+                // No metadata cache results, use simple sorting from main database
+                switch (filterOptions.sortOrder) {
+                case FilterOptions::SortByDateDesc:
+                    orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                    break;
+                case FilterOptions::SortByDateAsc:
+                    orderBy = QStringLiteral("ORDER BY imported_at ASC");
+                    break;
+                case FilterOptions::SortByFileName:
+                    orderBy = QStringLiteral("ORDER BY file_name ASC");
+                    break;
+                default:
+                    orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                    break;
+                }
+                if (!orderBy.isEmpty()) {
+                    querySql += QStringLiteral(" %1").arg(orderBy);
+                }
+            }
+
+            QSqlQuery query(threadDb);
+            if (!filteredIds.isEmpty()) {
+                query.prepare(querySql);
+                for (qint64 id : filteredIds) {
+                    query.addBindValue(id);
+                }
+            } else {
+                query.prepare(querySql);
+            }
+
+            if (!query.exec()) {
+                qWarning() << "Failed to query filtered assets:" << query.lastError();
+                delete threadCache;
+                threadDb.close();
+                QSqlDatabase::removeDatabase(threadConnectionName);
+                emit self->assetsQueried(result);
+                return;
+            }
+
+            // Create a map for quick lookup
+            QHash<qint64, LibraryAsset> assetMap;
+            while (query.next()) {
+                LibraryAsset asset;
+                asset.id = query.value(QStringLiteral("id")).toLongLong();
+                asset.photoNumber = query.value(QStringLiteral("photo_number")).toString();
+                asset.fileName = query.value(QStringLiteral("file_name")).toString();
+                asset.originalRelativePath = query.value(QStringLiteral("original_path")).toString();
+                asset.previewRelativePath = query.value(QStringLiteral("preview_path")).toString();
+                asset.format = query.value(QStringLiteral("format")).toString();
+                asset.width = query.value(QStringLiteral("width")).toInt();
+                asset.height = query.value(QStringLiteral("height")).toInt();
+                assetMap.insert(asset.id, asset);
+            }
+
+            // Preserve order from filteredIds if available
+            if (!filteredIds.isEmpty()) {
+                for (qint64 id : filteredIds) {
+                    if (assetMap.contains(id)) {
+                        result.append(assetMap.value(id));
+                    }
+                }
+            } else {
+                // No filters, use query order
+                result = assetMap.values().toVector();
+            }
+
+            delete threadCache;
+        } else {
+            // Fallback to simple query without metadata cache
+            QString orderBy;
+            switch (filterOptions.sortOrder) {
+            case FilterOptions::SortByDateDesc:
+                orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                break;
+            case FilterOptions::SortByDateAsc:
+                orderBy = QStringLiteral("ORDER BY imported_at ASC");
+                break;
+            case FilterOptions::SortByFileName:
+                orderBy = QStringLiteral("ORDER BY file_name ASC");
+                break;
+            default:
+                orderBy = QStringLiteral("ORDER BY imported_at DESC");
+                break;
+            }
+
+            QSqlQuery query(threadDb);
+            const QString sql = QStringLiteral("SELECT id, photo_number, file_name, original_path, preview_path, format, width, height FROM assets %1").arg(orderBy);
+            if (!query.exec(sql)) {
+                qWarning() << "Failed to query assets:" << query.lastError();
+                threadDb.close();
+                QSqlDatabase::removeDatabase(threadConnectionName);
+                emit self->assetsQueried(result);
+                return;
+            }
+
+            while (query.next()) {
+                LibraryAsset asset;
+                asset.id = query.value(QStringLiteral("id")).toLongLong();
+                asset.photoNumber = query.value(QStringLiteral("photo_number")).toString();
+                asset.fileName = query.value(QStringLiteral("file_name")).toString();
+                asset.originalRelativePath = query.value(QStringLiteral("original_path")).toString();
+                asset.previewRelativePath = query.value(QStringLiteral("preview_path")).toString();
+                asset.format = query.value(QStringLiteral("format")).toString();
+                asset.width = query.value(QStringLiteral("width")).toInt();
+                asset.height = query.value(QStringLiteral("height")).toInt();
+                result.append(asset);
+            }
+        }
+
+        // Clean up thread-local database connection
+        threadDb.close();
+        QSqlDatabase::removeDatabase(threadConnectionName);
+
+        emit self->assetsQueried(result);
+    });
+}
+
 MetadataCache *LibraryManager::metadataCache() const
 {
     return m_metadataCache;
@@ -454,7 +673,6 @@ void LibraryManager::importFiles(const QStringList &filePaths)
 
     const int total = filePaths.size();
     int imported = 0;
-    int nextPhotoNumber = currentMaxPhotoNumber();
     
     // Count how many files will need metadata extraction and preview generation
     int metadataExtractionCount = 0;
@@ -470,15 +688,40 @@ void LibraryManager::importFiles(const QStringList &filePaths)
         }
     }
     
+    // Queue batch job starts to main thread (they access JobManager which is a QObject)
     if (previewGenerationCount > 0) {
-        startBatchPreviewJob(previewGenerationCount);
+        QMetaObject::invokeMethod(this, "doStartBatchPreviewJob", Qt::QueuedConnection, Q_ARG(int, previewGenerationCount));
     }
     if (metadataExtractionCount > 0) {
-        startBatchMetadataJob(metadataExtractionCount);
+        QMetaObject::invokeMethod(this, "doStartBatchMetadataJob", Qt::QueuedConnection, Q_ARG(int, metadataExtractionCount));
     }
 
-    if (!m_database.transaction()) {
-        emit errorOccurred(QStringLiteral("Failed to begin import transaction: %1").arg(m_database.lastError().text()));
+    // Create a thread-local database connection for this import operation
+    // SQLite connections are not thread-safe, so each thread needs its own connection
+    const QString threadConnectionName = QStringLiteral("%1_import_%2").arg(m_connectionName).arg(QUuid::createUuid().toString(QUuid::Id128));
+    QSqlDatabase threadDb = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), threadConnectionName);
+    threadDb.setDatabaseName(QDir(m_libraryPath).filePath(QString::fromLatin1(kDatabaseFileName)));
+    
+    if (!threadDb.open()) {
+        emit errorOccurred(QStringLiteral("Failed to open thread-local database connection: %1").arg(threadDb.lastError().text()));
+        QSqlDatabase::removeDatabase(threadConnectionName);
+        return;
+    }
+
+    // Get next photo number using thread-local database connection
+    int nextPhotoNumber = 0;
+    QSqlQuery maxQuery(threadDb);
+    if (maxQuery.exec(QStringLiteral("SELECT MAX(CAST(photo_number AS INTEGER)) FROM assets"))) {
+        if (maxQuery.next()) {
+            nextPhotoNumber = maxQuery.value(0).toInt();
+        }
+    } else {
+        qWarning() << "Failed to query max photo number:" << maxQuery.lastError();
+    }
+
+    if (!threadDb.transaction()) {
+        emit errorOccurred(QStringLiteral("Failed to begin import transaction: %1").arg(threadDb.lastError().text()));
+        QSqlDatabase::removeDatabase(threadConnectionName);
         return;
     }
 
@@ -500,7 +743,7 @@ void LibraryManager::importFiles(const QStringList &filePaths)
             continue;
         }
 
-        QSqlQuery insert(m_database);
+        QSqlQuery insert(threadDb);
         insert.prepare(QStringLiteral(
             "INSERT INTO assets (file_name, original_path, format, imported_at, photo_number) "
             "VALUES (?, ?, ?, ?, ?)"));
@@ -532,29 +775,39 @@ void LibraryManager::importFiles(const QStringList &filePaths)
         }
         asset.previewRelativePath = reservedPreview;
 
-        // Enqueue metadata extraction in background
+        // Queue metadata extraction to main thread (creates QObjects)
         if (m_metadataCache && m_metadataCache->hasOpenCache()) {
-            enqueueMetadataExtraction(assetId, sourceFile);
+            QMetaObject::invokeMethod(this, "doEnqueueMetadataExtraction", Qt::QueuedConnection,
+                                      Q_ARG(qint64, assetId), Q_ARG(QString, sourceFile));
         }
 
-        enqueuePreviewGeneration(asset);
+        // Queue preview generation to main thread (accesses JobManager QObject)
+        QMetaObject::invokeMethod(this, "doEnqueuePreviewGeneration", Qt::QueuedConnection,
+                                  Q_ARG(LibraryAsset, asset));
+        
         imported++;
         emit importProgress(imported, total);
     }
 
-    if (!m_database.commit()) {
-        emit errorOccurred(QStringLiteral("Failed to commit import transaction: %1").arg(m_database.lastError().text()));
+    if (!threadDb.commit()) {
+        emit errorOccurred(QStringLiteral("Failed to commit import transaction: %1").arg(threadDb.lastError().text()));
     }
+
+    // Clean up thread-local database connection
+    threadDb.close();
+    QSqlDatabase::removeDatabase(threadConnectionName);
 
     emit assetsChanged();
     emit importCompleted();
     
     // Complete batch jobs if all are done (they may complete asynchronously)
+    // These are called from the background thread, but the methods check JobManager
+    // which should be safe since we're just reading state
     if (m_previewGenerationTotal > 0 && m_previewGenerationCompleted >= m_previewGenerationTotal) {
-        completeBatchPreviewJob();
+        QMetaObject::invokeMethod(this, "completeBatchPreviewJob", Qt::QueuedConnection);
     }
     if (m_metadataExtractionTotal > 0 && m_metadataExtractionCompleted >= m_metadataExtractionTotal) {
-        completeBatchMetadataJob();
+        QMetaObject::invokeMethod(this, "completeBatchMetadataJob", Qt::QueuedConnection);
     }
 }
 
@@ -771,6 +1024,8 @@ void LibraryManager::enqueueMetadataExtraction(qint64 assetId, const QString &so
         if (isoStr.startsWith(QStringLiteral("ISO"), Qt::CaseInsensitive)) {
             isoStr = isoStr.mid(3).trimmed();
         }
+        // Remove any locale formatting (commas) before parsing
+        isoStr.remove(QLocale().groupSeparator());
         bool ok = false;
         int isoValue = isoStr.toInt(&ok);
         meta.iso = ok ? isoValue : 0;
@@ -1238,4 +1493,32 @@ bool LibraryManager::ensureBucketExists(const QString &baseDir, int bucketIndex)
         return true;
     }
     return dir.mkpath(bucket);
+}
+
+void LibraryManager::doEnqueueMetadataExtraction(qint64 assetId, const QString &sourceFile)
+{
+    // This method is called from the main thread via queued connection
+    // It's safe to create QObjects here
+    enqueueMetadataExtraction(assetId, sourceFile);
+}
+
+void LibraryManager::doEnqueuePreviewGeneration(const LibraryAsset &asset)
+{
+    // This method is called from the main thread via queued connection
+    // It's safe to access JobManager QObject here
+    enqueuePreviewGeneration(asset);
+}
+
+void LibraryManager::doStartBatchPreviewJob(int total)
+{
+    // This method is called from the main thread via queued connection
+    // It's safe to access JobManager QObject here
+    startBatchPreviewJob(total);
+}
+
+void LibraryManager::doStartBatchMetadataJob(int total)
+{
+    // This method is called from the main thread via queued connection
+    // It's safe to access JobManager QObject here
+    startBatchMetadataJob(total);
 }
