@@ -1,10 +1,12 @@
 #include "libraryfilterpane.h"
 
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QRegularExpression>
 #include <QSet>
+#include <qabstractitemview.h>
 
 LibraryFilterPane::LibraryFilterPane(QWidget *parent)
     : QWidget(parent)
@@ -67,6 +69,8 @@ void LibraryFilterPane::setupUI()
 
     m_cameraMakeCombo = new QComboBox(this);
     m_cameraMakeCombo->setEditable(false);
+    m_cameraMakeCombo->setMinimumWidth(150);
+    m_cameraMakeCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_cameraMakeCombo->addItem(tr("All"), QString());
     connect(m_cameraMakeCombo, QOverload<const QString &>::of(&QComboBox::currentTextChanged), this, &LibraryFilterPane::onCameraMakeChanged);
     mainLayout->addWidget(m_cameraMakeCombo);
@@ -108,9 +112,25 @@ void LibraryFilterPane::setAvailableCameraMakes(const QStringList &makes)
     m_cameraMakeCombo->clear();
     m_cameraMakeCombo->addItem(tr("All"), QString());
 
+    // Find the maximum width needed for all items
+    int maxWidth = 150; // Minimum width
+    QFontMetrics fm(m_cameraMakeCombo->font());
+    
     for (const QString &make : makes) {
         m_cameraMakeCombo->addItem(make, make);
+        int textWidth = fm.horizontalAdvance(make);
+        if (textWidth > maxWidth) {
+            maxWidth = textWidth;
+        }
     }
+    
+    // Set the view's minimum width to prevent text cutoff
+    if (m_cameraMakeCombo->view()) {
+        m_cameraMakeCombo->view()->setMinimumWidth(maxWidth + 50); // Add padding for scrollbar
+    }
+    
+    // Set combo box width to accommodate content
+    m_cameraMakeCombo->setMinimumWidth(qMin(maxWidth + 50, 400)); // Cap at 400px
 
     // Restore selection if still available
     int index = m_cameraMakeCombo->findData(current);

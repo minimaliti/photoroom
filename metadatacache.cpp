@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMutexLocker>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>

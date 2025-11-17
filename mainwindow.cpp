@@ -3148,7 +3148,7 @@ void MainWindow::on_actionImport_triggered()
     }
 
     const QString startDir = m_libraryManager->libraryPath();
-    const QString filter = tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp *.heic *.heif *.raw *.cr2 *.nef *.arw *.dng);;All Files (*.*)");
+    const QString filter = tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp *.heic *.heif *.raw *.cr2 *.nef *.arw *.rw2 *.dng);;All Files (*.*)");
     QStringList files = QFileDialog::getOpenFileNames(this,
                                                       tr("Import Files"),
                                                       startDir,
