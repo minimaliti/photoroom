@@ -75,6 +75,7 @@ signals:
 
 public slots:
     void requestAssets(const FilterOptions &filterOptions);
+    void saveDevelopAdjustmentsAsync(qint64 assetId, const DevelopAdjustments &adjustments);
 
 private slots:
     void doEnqueueMetadataExtraction(qint64 assetId, const QString &sourceFile);

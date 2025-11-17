@@ -1385,6 +1385,53 @@ bool LibraryManager::saveDevelopAdjustments(qint64 assetId,
     return true;
 }
 
+void LibraryManager::saveDevelopAdjustmentsAsync(qint64 assetId, const DevelopAdjustments &adjustments)
+{
+    // Capture necessary data before entering the lambda
+    if (!hasOpenLibrary() || assetId <= 0) {
+        return;
+    }
+
+    const QString libraryPath = m_libraryPath;
+    const QString connectionName = m_connectionName;
+    const QString dbPath = QDir(libraryPath).filePath(QString::fromLatin1(kDatabaseFileName));
+    const QByteArray payload = serializeAdjustments(adjustments);
+    const QString payloadText = QString::fromUtf8(payload);
+    const QString timestamp = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+
+    QtConcurrent::run([libraryPath, connectionName, dbPath, assetId, payloadText, timestamp]() {
+        // Create a thread-local database connection
+        const QString threadConnectionName = QStringLiteral("%1_save_%2").arg(connectionName).arg(QUuid::createUuid().toString(QUuid::Id128));
+        QSqlDatabase threadDb = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), threadConnectionName);
+        threadDb.setDatabaseName(dbPath);
+        
+        if (!threadDb.open()) {
+            qWarning() << "Failed to open thread-local database connection for saving adjustments:" << threadDb.lastError();
+            QSqlDatabase::removeDatabase(threadConnectionName);
+            return;
+        }
+
+        QSqlQuery query(threadDb);
+        query.prepare(QStringLiteral(
+            "INSERT INTO develop_adjustments(asset_id, payload, updated_at) "
+            "VALUES(?, ?, ?) "
+            "ON CONFLICT(asset_id) DO UPDATE SET "
+            "payload = excluded.payload, "
+            "updated_at = excluded.updated_at;"));
+        query.addBindValue(assetId);
+        query.addBindValue(payloadText);
+        query.addBindValue(timestamp);
+
+        if (!query.exec()) {
+            qWarning() << "Failed to persist adjustments in background:" << query.lastError().text();
+        }
+
+        // Clean up thread-local database connection
+        threadDb.close();
+        QSqlDatabase::removeDatabase(threadConnectionName);
+    });
+}
+
 void LibraryManager::ensureAssetStorageConsistency()
 {
     if (!hasOpenLibrary()) {

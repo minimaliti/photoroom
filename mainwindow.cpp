@@ -1743,13 +1743,9 @@ void MainWindow::persistCurrentAdjustments()
         return;
     }
 
-    QString error;
-    if (!m_libraryManager->saveDevelopAdjustments(m_currentDevelopAssetId, m_currentAdjustments, &error)) {
-        qWarning() << "Failed to persist adjustments:" << error;
-        showStatusMessage(tr("Unable to save adjustments: %1").arg(error), 4000);
-    } else {
-        m_savingAdjustmentsPending = false;
-    }
+    // Call the async version
+    m_libraryManager->saveDevelopAdjustmentsAsync(m_currentDevelopAssetId, m_currentAdjustments);
+    m_savingAdjustmentsPending = false;
 }
 
 void MainWindow::scheduleAdjustmentPersist()
