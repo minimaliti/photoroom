@@ -21,7 +21,6 @@
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QGraphicsBlurEffect>
 #include <QGraphicsView>
 #include <QImage>
 #include <QImageReader>
